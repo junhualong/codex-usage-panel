@@ -1,0 +1,26 @@
+# Local configuration, session statistics, logs, screenshots and history.
+/config.json
+/.local/
+/dist/
+/build/
+
+# These launchers contain the local Python installation path.
+/*.lnk
+/启动面板.cmd
+/关闭自动启动.cmd
+
+# Python-generated files and local environments.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Local credentials and editor state.
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

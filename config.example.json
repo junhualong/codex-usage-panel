@@ -1,0 +1,8 @@
+{
+  "codex_home": "",
+  "sessions_root": "",
+  "desktop_logs_root": "",
+  "refresh_ms": 1000,
+  "auto_follow": true,
+  "follow_window_id": 1
+}
