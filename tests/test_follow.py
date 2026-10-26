@@ -2,8 +2,9 @@ import json
 from pathlib import Path
 import sqlite3
 import unittest
+from unittest.mock import patch
 from test_usage import panel, WORK
-from active_session import DesktopSessionFollower, SessionResolver, classify_route, parse_route_event
+from active_session import DesktopSessionFollower, RouteLog, SessionResolver, classify_route, parse_route_event
 
 A = "00000000-0000-4000-8000-000000000001"
 B = "00000000-0000-4000-8000-000000000002"
@@ -87,6 +88,26 @@ class FollowTests(unittest.TestCase):
         self.assertFalse(self.follower.poll().path)
         self.resolver.paths[A] = "created-later.jsonl"
         self.assertEqual(self.follower.poll().path, "created-later.jsonl")
+
+    def test_reading_and_io_failure_are_distinct_from_waiting(self):
+        self.assertFalse(self.follower.poll().error)
+        with patch.object(RouteLog, "poll", return_value=(None, True, "")):
+            reading = self.follower.poll()
+        self.assertTrue(reading.loading)
+        self.assertFalse(reading.error)
+        with patch.object(RouteLog, "poll", return_value=(None, False, "导航日志读取失败：拒绝访问")):
+            failure = self.follower.poll()
+        self.assertFalse(failure.loading)
+        self.assertIn("拒绝访问", failure.error)
+        self.append(navigation("/local/" + A))
+        recovered = self.follower.poll()
+        self.assertEqual(recovered.session_id, A)
+        self.assertFalse(recovered.error)
+
+    def test_route_reader_keeps_os_error_reason(self):
+        reader = RouteLog(self.path, 1)
+        with patch.object(Path, "open", side_effect=PermissionError(13, "拒绝访问")):
+            self.assertIn("拒绝访问", reader.poll()[2])
 
     def test_process_exit_clears_route(self):
         self.append(navigation("/local/" + A))

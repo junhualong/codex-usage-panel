@@ -66,7 +66,8 @@ try:
     navigate("/local/" + A, 3)
     until(lambda: app.snapshot.session_id == A and app.snapshot.total.total_tokens == 1100)
     navigate("/remote/host/" + B, 4)
-    until(lambda: "远程" in app.snapshot.error)
+    until(lambda: "远程" in app.snapshot.message)
+    assert app.state()[0] == "等待会话" and not app.snapshot.error
     assert app.snapshot.total.total_tokens is None
     assert not app.snapshot.session_id
     assert app.snapshot.speed.tokens_per_second is None

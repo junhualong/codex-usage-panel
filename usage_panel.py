@@ -27,7 +27,9 @@ BACKGROUND = "#1c1e24"
 SURFACE = "#24272f"
 BORDER = "#383c47"
 TEXT = "#e5e9f1"
-MUTED = "#929ba9"
+MUTED = "#b1bac8"
+HOVER = "#343a46"
+SELECTED = "#293e50"
 ACCENT = "#9ed5ff"
 GREEN = "#8ed6b2"
 AMBER = "#e9bf80"
@@ -85,6 +87,7 @@ class Snapshot:
     has_usage: bool = False
     loading: bool = True
     error: str = ""
+    message: str = ""
     skipped: int = 0
 
 
@@ -216,11 +219,47 @@ def exact(number):
 
 def timestamp_label(value):
     if not value:
-        return "尚无用量记录"
+        return "—（尚无用量记录）"
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone().strftime("%m-%d %H:%M:%S")
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
     except ValueError:
-        return "时间格式未知"
+        return "—（记录时间格式未知）"
+
+
+def data_age(value, now=None):
+    if not value:
+        return "—"
+    try:
+        recorded = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone()
+        seconds = int(((now or datetime.now().astimezone()) - recorded).total_seconds())
+    except (ValueError, OverflowError, OSError):
+        return "—"
+    if seconds < 0:
+        return recorded.strftime("%m-%d %H:%M:%S")
+    if seconds < 60:
+        return "刚刚" if seconds < 5 else f"{seconds} 秒前"
+    if seconds < 3600:
+        return f"{seconds // 60} 分钟前"
+    if seconds < 86400:
+        return f"{seconds // 3600} 小时前"
+    return f"{seconds // 86400} 天前"
+
+
+def display_state(snapshot, following=False, selection=None):
+    """Use reader/navigation results and explicit turn events, never data age."""
+    if snapshot.error:
+        return "读取失败", snapshot.error, AMBER
+    if snapshot.loading:
+        return "读取中", snapshot.message or "正在读取本地历史记录，已读取的统计可能尚不完整", MUTED
+    if following and selection is not None and not selection.path:
+        label = "等待统计" if selection.session_id else "等待会话"
+        return label, selection.message, MUTED
+    if snapshot.active:
+        return "生成中", "本轮正在进行；用量和均速在调用结算后更新", GREEN
+    if not snapshot.has_usage or not any(value is not None for usage in (snapshot.total, snapshot.last)
+                                         for value in vars(usage).values()):
+        return "等待统计", "日志尚无有效用量统计，等待模型调用结算", MUTED
+    return "等待新的调用", "保留上次有效用量，等待新的调用", MUTED
 
 
 def read_titles(root):
@@ -319,10 +358,9 @@ def singleton():
 
 
 class UsagePanel:
-    SPEED_WIDTH = 132
-    WIDTH = 600 + SPEED_WIDTH
+    WIDTH = 840
     BAR_HEIGHT = 48
-    EXPANDED_HEIGHT = 316
+    EXPANDED_HEIGHT = 364
 
     def __init__(self, root, config, state_dir, session_override=None, close_signal=None):
         self.root = root
@@ -353,6 +391,14 @@ class UsagePanel:
         self.closed = False
         self.tooltip = None
         self.tooltip_job = None
+        self.hovered_tag = None
+        self.hints = {}
+        self.button_fills = {}
+        self.copy_until = 0
+        self.scope_menu = None
+        self.menu_open = False
+        self.pressed_action = None
+        self.scope_variable = tk.StringVar(root, value=self.mode)
         self.fonts = {}
         self.poll_job = None
         self.drag_origin = None
@@ -384,7 +430,7 @@ class UsagePanel:
         self.render()
         root.deiconify()
         if self.follow_enabled:
-            self.snapshot = Snapshot(loading=False, error="正在识别当前聊天")
+            self.snapshot = Snapshot(loading=False, message=self.follow_selection.message)
             self.start_follow_reader()
         else:
             self.start_reader()
@@ -416,147 +462,234 @@ class UsagePanel:
         return self.canvas.create_polygon([self.px(v) for v in coords], smooth=True,
                                           splinesteps=24, fill=fill, outline=outline, tags=tags)
 
-    def ellipsis(self, value, width, size=12):
-        font = self.font(size)
+    def ellipsis(self, value, width, size=12, bold=False):
+        font = self.font(size, bold)
         if font.measure(value) <= self.px(width):
             return value
         while value and font.measure(value + "…") > self.px(width):
             value = value[:-1]
         return value + "…"
 
-    def action(self, tag, callback, help_text):
-        self.canvas.tag_bind(tag, "<Button-1>", lambda _e: callback())
-        self.canvas.tag_bind(tag, "<Enter>", lambda e: self.hover(e, help_text, True))
+    @property
+    def scope_label(self):
+        return "会话累计" if self.mode == "total" else "最近调用"
+
+    @property
+    def current_usage(self):
+        return self.snapshot.total if self.mode == "total" else self.snapshot.last
+
+    def state(self):
+        return display_state(self.snapshot, self.follow_enabled, self.follow_selection)
+
+    def session_name(self):
+        return self.titles.get(self.snapshot.session_id) or (
+            "当前 Codex 会话（索引暂无名称）" if self.snapshot.session_id else "尚未识别聊天名称")
+
+    def follow_hint(self):
+        method = ("跟随方式：读取 Codex 主窗口的本地导航记录，随切换聊天更新"
+                  if self.follow_enabled else f"固定会话：读取指定日志\n{self.path}")
+        state, reason, _ = self.state()
+        return f"{method}\n当前聊天：{self.session_name()}\n会话 ID：{self.snapshot.session_id or '—'}\n{state}：{reason}"
+
+    def usage_hint(self):
+        usage = self.current_usage
+        state, reason, _ = self.state()
+        return (f"统计范围：{self.scope_label}（同时影响用量和缓存命中率）\n"
+                f"输入 {exact(usage.input_tokens)} + 输出 {exact(usage.output_tokens)} = {exact(usage.total_tokens)} tokens\n"
+                "K = 1,000，M = 1,000,000，B = 1,000,000,000\n"
+                "会话累计用量不代表当前上下文占用；缓存已包含在输入中\n"
+                f"{state}：{reason}\n— 表示该范围的统计字段缺失，不能视为 0")
+
+    def cache_hint(self):
+        usage = self.current_usage
+        reason = ("— 表示输入为 0、计数缺失或缓存计数超出输入，无法计算比例"
+                  if usage.cache_rate is None else f"缓存命中率：{usage.cache_rate:.2f}%")
+        return (f"统计范围：{self.scope_label}\n已缓存 {exact(usage.cached_input_tokens)} ÷ 输入 {exact(usage.input_tokens)} tokens\n"
+                f"{reason}\n缓存命中率不是费用节省比例\n{self.state()[1]}")
+
+    def speed_hint(self):
+        sample = self.snapshot.speed
+        detail = ("—：等待本轮调用结算及完整生成时间；旧日志可能缺少计时记录"
+                  if sample.tokens_per_second is None else
+                  f"输出 {exact(sample.output_tokens)} tokens ÷ {sample.duration_ms / 1000:.3f} 秒")
+        return ("速度始终表示本轮最近一次已结算调用的平均生成速度，不随统计范围切换\n" + detail +
+                "\n含推理和工具参数输出；不计工具执行等待\n≈ 为本地记录估算，非逐 token 瞬时速度")
+
+    def method_hint(self):
+        interval = max(0.25, float(self.config.get("refresh_ms", 1000)) / 1000)
+        return ("用量和缓存命中率使用所选统计范围；最近调用指一次模型调用\n"
+                "总用量 = 输入 + 输出；已缓存、未缓存组成输入，其中推理属于输出\n"
+                "缓存命中率 = 已缓存 ÷ 输入；会话累计用量不代表当前上下文占用\n" + self.speed_hint() +
+                f"\n每 {interval:g} 秒检查本地用量日志，通常在调用结算后更新；新一轮开始清空上一轮速度\n"
+                "数据时间对应最近一次用量统计记录时间，不是面板刷新时间；空闲时保留上次数据")
+
+    def call_summary(self):
+        sample = self.snapshot.speed
+        duration = "—" if sample.tokens_per_second is None else f"{sample.duration_ms / 1000:.2f} 秒"
+        return f"最近调用：{speed_label(sample)} tok/s · 输出 {exact(sample.output_tokens)} · 耗时 {duration}"
+
+    def hint(self, tag, help_text, clickable=False):
+        self.hints[tag] = help_text
+        self.canvas.tag_bind(tag, "<Enter>", lambda e: self.hover(e, tag, clickable))
         self.canvas.tag_bind(tag, "<Leave>", self.hide_tooltip)
 
-    def hitbox(self, x1, x2, tag):
-        self.canvas.create_rectangle(self.px(x1), self.px(6), self.px(x2), self.px(42),
-                                     fill=BACKGROUND, outline="", tags=("button", tag))
+    def action(self, tag, callback, help_text):
+        # A press-time redraw removes Canvas's current item before drag_start runs.
+        # Activate on release so a bottom-edge expansion cannot become a drag anchor.
+        self.canvas.tag_bind(tag, "<ButtonPress-1>", lambda _e: self.press_action(tag))
+        self.canvas.tag_bind(tag, "<ButtonRelease-1>", lambda _e: self.release_action(tag, callback))
+        self.hint(tag, help_text, True)
+
+    def press_action(self, tag):
+        self.pressed_action = tag
+
+    def release_action(self, tag, callback):
+        pressed, self.pressed_action = self.pressed_action, None
+        if pressed == tag:
+            callback()
+
+    def hitbox(self, x1, x2, tag, y1=6, y2=42, selected=False):
+        fill = SELECTED if selected else BACKGROUND
+        self.button_fills[tag] = fill
+        self.rounded(x1, y1, x2, y2, 6, fill, tags=("button", tag, tag + "_bg"))
+
+    def number(self, right, y, value, width, color=TEXT, size=13, bold=False, tags=()):
+        # Keep exact, right-aligned digits even for large cumulative counts and DPI scaling.
+        while size > 8 and self.font(size, bold, True).measure(value) > self.px(width):
+            size -= 1
+        return self.text(right, y, value, color, size, anchor="e", bold=bold, mono=True, tags=tags)
 
     def render(self):
+        self.hide_tooltip()
+        self.hints.clear()
+        self.button_fills.clear()
         c = self.canvas
         c.delete("all")
         height = self.EXPANDED_HEIGHT if self.expanded else self.BAR_HEIGHT
         self.rounded(1, 1, self.WIDTH-1, height-1, 12, BACKGROUND, BORDER)
-        usage = self.snapshot.total if self.mode == "total" else self.snapshot.last
-        rate = usage.cache_rate
-        if self.snapshot.error:
-            state_color, brand = AMBER, "未连接"
-        elif self.snapshot.loading:
-            state_color, brand = AMBER, "读取中"
-        else:
-            state_color, brand = (GREEN if self.snapshot.active else MUTED), "CODEX"
-        c.create_oval(self.px(15), self.px(21), self.px(21), self.px(27), fill=state_color, outline="")
-        self.text(30, 24, brand, MUTED, 11, bold=True)
-        self.line(91, 15, 91, 33)
-        fixed_items = set(c.find_all())
-        self.hitbox(99, 149, "scope")
-        self.text(110, 24, "累计" if self.mode == "total" else "单次", MUTED, 11, tags=("button", "scope"))
-        self.line(140, 22, 143, 25, MUTED, tags=("button", "scope"))
-        self.line(143, 25, 146, 22, MUTED, tags=("button", "scope"))
-        self.action("scope", self.toggle_mode, "点击切换：会话累计 / 最近一次模型调用")
-        self.text(161, 24, compact(usage.total_tokens), ACCENT, 18, bold=True, mono=True, tags=("tokens",))
-        self.text(249, 25, "tok", MUTED, 11, tags=("tokens",))
-        self.canvas.tag_bind("tokens", "<Enter>", lambda e: self.hover(e,
-            f"输入 {exact(usage.input_tokens)} + 输出 {exact(usage.output_tokens)} = {exact(usage.total_tokens)} tokens\nK = 1,000，M = 1,000,000；缓存已包含在输入中"))
-        self.canvas.tag_bind("tokens", "<Leave>", self.hide_tooltip)
-        self.line(281, 15, 281, 33)
-        # Small database icon, drawn without relying on emoji glyphs.
-        c.create_rectangle(self.px(296), self.px(20), self.px(306), self.px(28), outline=MUTED)
-        c.create_oval(self.px(296), self.px(17), self.px(306), self.px(23), fill=BACKGROUND, outline=MUTED)
-        c.create_arc(self.px(296), self.px(25), self.px(306), self.px(31), start=180, extent=180, style="arc", outline=MUTED)
-        self.text(316, 23, "缓存命中", MUTED, 11, tags=("cache",))
-        self.text(378, 23, "—" if rate is None else f"{rate:.1f}%", GREEN, 15, bold=True, mono=True, tags=("cache",))
-        self.line(316, 35, 424, 35, BORDER, 2)
-        if rate is not None and rate > 0:
-            self.line(316, 35, 316 + 108 * rate / 100, 35, GREEN, 2)
-        self.canvas.tag_bind("cache", "<Enter>", lambda e: self.hover(e,
-            f"缓存命中 {exact(usage.cached_input_tokens)} / 输入 {exact(usage.input_tokens)} tokens\n缓存命中率不是费用节省比例"))
-        self.canvas.tag_bind("cache", "<Leave>", self.hide_tooltip)
-        self.line(440, 15, 440, 33)
-        self.hitbox(446, 477, "pin")
-        pin_color = ACCENT if self.topmost else MUTED
-        self.line(457, 17, 467, 17, pin_color, 1, ("button", "pin"))
-        self.line(459, 17, 459, 23, pin_color, 1, ("button", "pin"))
-        self.line(465, 17, 465, 23, pin_color, 1, ("button", "pin"))
-        self.line(457, 24, 467, 24, pin_color, 1, ("button", "pin"))
-        self.line(462, 24, 462, 31, pin_color, 1, ("button", "pin"))
-        self.action("pin", self.toggle_topmost, "置顶已开启，点击取消" if self.topmost else "点击保持面板置顶")
-        self.hitbox(480, 513, "follow")
-        self.text(496, 24, "自动" if self.follow_enabled else "固定", ACCENT, 11,
-                  anchor="center", tags=("button", "follow"))
-        self.action("follow", lambda: self.set_expanded(True),
-                    "自动跟随 Codex 主窗口当前打开的聊天" if self.follow_enabled else "正在跟踪指定日志")
-        self.hitbox(516, 556, "details")
-        self.text(536, 24, "收起" if self.expanded else "明细", MUTED, 11, anchor="center", tags=("button", "details"))
-        self.action("details", lambda: self.set_expanded(not self.expanded), "展开或收起精确用量；也可右键查看菜单")
-        self.hitbox(562, 592, "close")
-        self.line(573, 20, 581, 28, MUTED, tags=("button", "close"))
-        self.line(581, 20, 573, 28, MUTED, tags=("button", "close"))
-        self.action("close", self.close, "关闭统计面板")
-        # Move the existing controls as one block to keep their hit areas aligned.
-        for item in set(c.find_all()) - fixed_items:
-            c.move(item, self.px(self.SPEED_WIDTH), 0)
+        usage, rate = self.current_usage, self.current_usage.cache_rate
+        state, reason, state_color = self.state()
+        brand = "CODEX" if state == "等待新的调用" else state
+        c.create_oval(self.px(15), self.px(21), self.px(21), self.px(27), fill=state_color, outline="", tags=("state",))
+        self.text(30, 24, brand, state_color, 11, bold=True, tags=("state",))
+        self.hint("state", f"{state}：{reason}")
+        self.line(94, 15, 94, 33)
         self.draw_speed()
+        self.hitbox(253, 350, "scope")
+        self.text(264, 24, self.scope_label, TEXT, 11, tags=("button", "scope"))
+        self.line(333, 22, 337, 26, MUTED, tags=("button", "scope"))
+        self.line(337, 26, 341, 22, MUTED, tags=("button", "scope"))
+        self.action("scope", self.open_scope_menu, "选择会话累计或最近调用：影响用量及缓存命中率，均速保持本轮最近已结算调用口径")
+        self.number(454, 24, compact(usage.total_tokens), 96, ACCENT, 18, True, ("tokens", "compact_total"))
+        self.text(464, 25, "tok", MUTED, 11, tags=("tokens",))
+        self.hint("tokens", self.usage_hint)
+        self.line(496, 15, 496, 33)
+        self.text(510, 23, "缓存命中", MUTED, 11, tags=("cache",))
+        self.text(628, 23, "—" if rate is None else f"{rate:.1f}%", GREEN, 15, anchor="e", bold=True, mono=True, tags=("cache", "cache_rate"))
+        self.line(510, 35, 628, 35, BORDER, 2, ("cache",))
+        if rate is not None and rate > 0:
+            self.line(510, 35, 510 + 118 * rate / 100, 35, GREEN, 2, ("cache",))
+        self.hint("cache", self.cache_hint)
+        self.line(642, 15, 642, 33)
+        following = bool(self.follow_selection.path)
+        badge = ("跟随中" if following else state) if self.follow_enabled else "固定会话"
+        self.rounded(650, 9, 714, 39, 6, SURFACE, tags=("follow",))
+        self.text(682, 24, badge, ACCENT if following or not self.follow_enabled else MUTED,
+                  11, anchor="center", tags=("follow",))
+        self.hint("follow", self.follow_hint)
+        self.hitbox(722, 752, "pin", selected=self.topmost)
+        pin_color = ACCENT if self.topmost else MUTED
+        self.line(732, 17, 742, 17, pin_color, 1, ("button", "pin"))
+        self.line(734, 17, 734, 23, pin_color, 1, ("button", "pin"))
+        self.line(740, 17, 740, 23, pin_color, 1, ("button", "pin"))
+        self.line(732, 24, 742, 24, pin_color, 1, ("button", "pin"))
+        self.line(737, 24, 737, 31, pin_color, 1, ("button", "pin"))
+        self.action("pin", self.toggle_topmost, "置顶已开启，点击取消" if self.topmost else "点击保持面板置顶")
+        self.hitbox(758, 798, "details")
+        self.text(778, 24, "收起" if self.expanded else "明细", TEXT, 11, anchor="center", tags=("button", "details"))
+        self.action("details", lambda: self.set_expanded(not self.expanded), "展开或收起精确用量；Esc 可收起")
+        self.hitbox(804, 834, "close")
+        self.line(815, 20, 823, 28, MUTED, tags=("button", "close"))
+        self.line(823, 20, 815, 28, MUTED, tags=("button", "close"))
+        self.action("close", self.close, "关闭统计面板")
         if self.expanded:
             self.draw_details(usage)
 
     def draw_speed(self):
-        sample = self.snapshot.speed
-        self.canvas.create_arc(self.px(103), self.px(17), self.px(118), self.px(32),
-                               start=0, extent=180, style="arc", outline=MUTED, tags=("speed",))
-        self.line(111, 25, 115, 20, MUTED, tags=("speed",))
-        self.text(124, 24, speed_label(sample), ACCENT, 16, bold=True, mono=True, tags=("speed",))
-        self.text(188, 25, "tok/s", MUTED, 10, tags=("speed",))
-        self.line(223, 15, 223, 33)
-        if sample.tokens_per_second is None:
-            detail = "等待本轮调用结算及完整生成时间"
-        else:
-            detail = f"输出 {exact(sample.output_tokens)} tokens ÷ {sample.duration_ms / 1000:.3f} 秒"
-        help_text = ("本轮最近一次模型调用的平均生成速度\n" + detail +
-                     "\n含推理和工具参数输出；不计工具执行等待\n≈ 为本地记录估算，非逐 token 瞬时速度")
-        self.canvas.tag_bind("speed", "<Enter>", lambda e: self.hover(e, help_text))
-        self.canvas.tag_bind("speed", "<Leave>", self.hide_tooltip)
+        self.text(105, 24, "均速", MUTED, 11, tags=("speed",))
+        self.number(194, 24, speed_label(self.snapshot.speed), 60, ACCENT, 16, True, ("speed", "speed_value"))
+        self.text(204, 25, "tok/s", MUTED, 10, tags=("speed",))
+        self.line(244, 15, 244, 33)
+        self.hint("speed", self.speed_hint)
 
     def draw_details(self, usage):
         right, middle = self.WIDTH - 22, self.WIDTH // 2
         self.line(18, 49, self.WIDTH - 18, 49)
         session_id = self.snapshot.session_id
-        name = self.titles.get(session_id) or ("当前 Codex 会话" if session_id else "等待当前会话")
-        self.text(22, 74, self.ellipsis(name, self.WIDTH - 210, 13), TEXT, 13, bold=True)
-        self.text(right, 74, session_id[:8] or "等待日志", MUTED, 10, anchor="e", mono=True)
-        state = self.snapshot.error or ("正在读取历史记录" if self.snapshot.loading else
-                "生成中" if self.snapshot.active else "等待新的调用")
-        if self.follow_enabled and not self.snapshot.error:
-            state = "自动跟随 · " + state
-        self.text(22, 98, self.ellipsis(state, 285, 11), AMBER if self.snapshot.error else MUTED, 11)
-        self.text(right, 98, "更新于 " + timestamp_label(self.snapshot.timestamp), MUTED, 10, anchor="e")
-        self.rounded(16, 120, self.WIDTH - 16, 235, 8, SURFACE)
-        self.line(middle, 136, middle, 219, BORDER)
+        self.text(22, 72, self.ellipsis(self.session_name(), self.WIDTH - 165, 13, True), TEXT, 13, bold=True, tags=("session", "session_title"))
+        self.text(right, 72, session_id[:8] or "尚无 ID", MUTED, 11, anchor="e", mono=True, tags=("session",))
+        self.hint("session", self.follow_hint)
+        state, reason, state_color = self.state()
+        self.text(22, 96, state, state_color, 11, tags=("detail_state",))
+        self.hint("detail_state", f"{state}：{reason}")
+        self.text(right, 96, self.data_time_text(), MUTED, 11, anchor="e", tags=("data_time",))
+        self.hint("data_time", lambda: "用量统计记录时间（本地时区）：" + timestamp_label(self.snapshot.timestamp) +
+                  "\n不是界面刷新时间；空闲时保留上次有效记录时间")
+        if state in ("等待会话", "读取中", "等待统计", "读取失败"):
+            self.text(22, 117, self.ellipsis(reason, self.WIDTH - 44, 11), state_color, 11, tags=("reason",))
+            self.hint("reason", reason)
+        self.rounded(16, 136, self.WIDTH - 16, 287, 8, SURFACE)
+        self.text(28, 154, f"{self.scope_label}用量 · tokens", MUTED, 11, tags=("usage_scope",))
+        self.hint("usage_scope", self.usage_hint)
+        self.line(middle, 175, middle, 247, BORDER)
         entries = [
-            (28, 145, "输入 tokens", usage.input_tokens, middle - 24, TEXT),
-            (28, 179, "缓存命中 tokens", usage.cached_input_tokens, middle - 24, GREEN),
-            (28, 213, "未命中输入 tokens", usage.uncached_input, middle - 24, MUTED),
-            (middle + 20, 145, "输出 tokens", usage.output_tokens, right - 8, TEXT),
-            (middle + 20, 179, "其中推理 tokens", usage.reasoning_output_tokens, right - 8, MUTED),
-            (middle + 20, 213, "合计 tokens", usage.total_tokens, right - 8, ACCENT),
+            (28, 183, "输入总量", usage.input_tokens, middle - 24, TEXT, True, "input"),
+            (44, 210, "已缓存", usage.cached_input_tokens, middle - 24, GREEN, False, "cached"),
+            (44, 237, "未缓存", usage.uncached_input, middle - 24, MUTED, False, "uncached"),
+            (middle + 20, 183, "输出总量", usage.output_tokens, right - 8, TEXT, True, "output"),
+            (middle + 36, 210, "其中推理", usage.reasoning_output_tokens, right - 8, MUTED, False, "reasoning"),
         ]
-        for x, y, label, number, value_x, color in entries:
-            self.text(x, y, label, MUTED, 11)
-            self.text(value_x, y, exact(number), color, 13, anchor="e", mono=True)
-        scope = "会话累计" if self.mode == "total" else "最近一次模型调用"
-        self.text(22, 255, f"{scope} · 缓存率 = 缓存命中 ÷ 输入", MUTED, 11)
-        speed = self.snapshot.speed
-        detail = (f"本轮最近调用：{speed_label(speed)} tok/s · {exact(speed.output_tokens)} 输出 / {speed.duration_ms / 1000:.2f} 秒 · 含推理"
-                  if speed.tokens_per_second is not None else "生成速度：等待本轮调用结算及完整时间记录")
-        self.text(22, 276, detail, ACCENT, 11)
-        self.text(22, 300, "自动跟随主窗口 · 每秒检查用量 · 速度为最近调用平均值" if self.follow_enabled
-                  else "每秒检查日志 · 用量在模型调用结算后更新 · 只读本地记录", MUTED, 10)
+        for x, y, label, number, value_x, color, bold, tag in entries:
+            self.text(x, y, label, TEXT if bold else MUTED, 12, bold=bold, tags=(tag,))
+            self.number(value_x, y, exact(number), value_x-x-90, color, 14 if bold else 13, bold, (tag, tag + "_value"))
+            self.hint(tag, self.usage_hint)
+        self.line(28, 255, right - 8, 255)
+        self.text(28, 272, "总用量", TEXT, 12, bold=True, tags=("total",))
+        self.text(95, 272, "= 输入 + 输出", MUTED, 11, tags=("total",))
+        self.number(right - 8, 272, exact(usage.total_tokens), self.WIDTH - 250, ACCENT, 15, True, ("total", "total_value"))
+        self.hint("total", self.usage_hint)
+        self.text(22, 309, self.ellipsis(self.call_summary(), self.WIDTH - 44, 12), ACCENT, 12, tags=("call_summary",))
+        self.hint("call_summary", lambda: self.call_summary() + "\n" + self.speed_hint())
+        self.text(22, 341, "统计口径 ⓘ", MUTED, 11, tags=("method",))
+        self.hint("method", self.method_hint)
+        self.hitbox(self.WIDTH - 115, self.WIDTH - 20, "copy", 326, 356)
+        self.text(self.WIDTH - 67, 341, "已复制" if self.copy_until else "复制统计", ACCENT, 11,
+                  anchor="center", tags=("button", "copy", "copy_label"))
+        self.action("copy", self.copy_stats, "复制当前范围的精确用量、缓存命中率、速度口径及数据时间")
 
-    def hover(self, event, text, clickable=False):
+    def data_time_text(self):
+        return "数据时间：" + data_age(self.snapshot.timestamp)
+
+    def refresh_transient(self):
+        # Update only these items: idle clocks must not redraw hovered controls.
+        if self.expanded:
+            self.canvas.itemconfigure("data_time", text=self.data_time_text())
+        if self.copy_until and time.monotonic() >= self.copy_until:
+            self.copy_until = 0
+            self.canvas.itemconfigure("copy_label", text="复制统计")
+
+    def hover(self, event, tag, clickable=False):
         self.hide_tooltip()
+        if self.menu_open:
+            return
+        self.hovered_tag = tag
+        if clickable:
+            self.canvas.itemconfigure(tag + "_bg", fill=HOVER)
         self.canvas.configure(cursor="hand2" if clickable else "")
-        self.tooltip_job = self.root.after(450, lambda: self.show_tooltip(event.x_root, event.y_root, text))
+        def show():
+            hint = self.hints.get(tag, "")
+            self.show_tooltip(event.x_root, event.y_root, hint() if callable(hint) else hint)
+        self.tooltip_job = self.root.after(450, show)
 
     def show_tooltip(self, x, y, text):
         self.tooltip_job = None
@@ -564,7 +697,8 @@ class UsagePanel:
         tip.overrideredirect(True)
         tip.attributes("-topmost", True)
         label = tk.Label(tip, text=text, bg=SURFACE, fg=TEXT, padx=12, pady=9,
-                         justify="left", font=self.font(11), relief="solid", bd=1)
+                         justify="left", font=self.font(11), relief="solid", bd=1,
+                         wraplength=min(self.px(560), work_area(self.root)[2] - work_area(self.root)[0] - 40))
         label.pack()
         tip.update_idletasks()
         left, top, right, bottom = work_area(self.root)
@@ -572,6 +706,9 @@ class UsagePanel:
         self.tooltip = tip
 
     def hide_tooltip(self, _event=None):
+        if self.hovered_tag in self.button_fills:
+            self.canvas.itemconfigure(self.hovered_tag + "_bg", fill=self.button_fills[self.hovered_tag])
+        self.hovered_tag = None
         if self.tooltip_job:
             self.root.after_cancel(self.tooltip_job)
             self.tooltip_job = None
@@ -585,7 +722,8 @@ class UsagePanel:
         self.stop = threading.Event()
         self.generation += 1
         generation, stop, path = self.generation, self.stop, self.path
-        self.snapshot = Snapshot()
+        session_id = self.follow_selection.session_id if self.follow_enabled else ""
+        self.snapshot = Snapshot(session_id=session_id)
         interval = max(0.25, float(self.config.get("refresh_ms", 1000)) / 1000)
 
         def worker():
@@ -593,6 +731,8 @@ class UsagePanel:
             while not stop.is_set():
                 current = tailer.poll()
                 copy = Snapshot(**vars(current))
+                # Navigation already identifies the chat even if its log cannot be read yet.
+                copy.session_id = copy.session_id or session_id
                 try:
                     self.queue.put_nowait((generation, copy))
                 except queue.Full:
@@ -617,7 +757,7 @@ class UsagePanel:
                 try:
                     selection = follower.poll()
                 except (OSError, ValueError) as exc:
-                    selection = Selection(message=f"当前聊天识别暂不可用：{type(exc).__name__}")
+                    selection = Selection(error=f"当前聊天识别失败：{getattr(exc, 'strerror', None) or str(exc) or type(exc).__name__}")
                 try:
                     self.follow_queue.put_nowait(selection)
                 except queue.Full:
@@ -647,7 +787,8 @@ class UsagePanel:
             # Never present the previous chat's counters as the newly opened chat.
             self.stop.set()
             self.generation += 1
-            self.snapshot = Snapshot(session_id=selection.session_id, loading=False, error=selection.message)
+            self.snapshot = Snapshot(session_id=selection.session_id, loading=selection.loading,
+                                     error=selection.error, message=selection.message)
         return True
 
     def publish_status(self):
@@ -667,7 +808,8 @@ class UsagePanel:
                 "speed_timestamp": self.snapshot.speed.timestamp,
                 "speed_turn_id": self.snapshot.speed.turn_id,
                 "usage_timestamp": self.snapshot.timestamp,
-                "error": self.snapshot.error, "loading": self.snapshot.loading}
+                "error": self.snapshot.error, "loading": self.snapshot.loading,
+                "display_state": self.state()[0], "state_reason": self.state()[1]}
         if data == self.last_status:
             return
         try:
@@ -703,14 +845,45 @@ class UsagePanel:
             pass
         if changed:
             self.render()
+        self.refresh_transient()
         self.publish_status()
         self.poll_job = self.root.after(150, self.tick)
 
     def toggle_mode(self):
-        self.mode = "last" if self.mode == "total" else "total"
+        self.set_mode("last" if self.mode == "total" else "total")
+
+    def set_mode(self, mode):
+        if mode not in ("total", "last"):
+            return
+        self.mode = mode
+        self.scope_variable.set(mode)
+        self.copy_until = 0
         self.hide_tooltip()
         self.render()
         self.save_settings()
+
+    def open_scope_menu(self):
+        self.hide_tooltip()
+        if self.scope_menu is not None:
+            self.scope_menu.destroy()
+        menu = self.scope_menu = tk.Menu(self.root, tearoff=False, bg=SURFACE, fg=TEXT,
+                                         activebackground=HOVER, activeforeground=TEXT,
+                                         selectcolor=ACCENT, font=self.font(12))
+        self.scope_variable.set(self.mode)
+        for mode, label in (("total", "会话累计"), ("last", "最近调用")):
+            menu.add_radiobutton(label=label, value=mode, variable=self.scope_variable,
+                                 command=lambda value=mode: self.set_mode(value))
+        self.popup_menu(menu, self.canvas.winfo_rootx() + self.px(253), self.canvas.winfo_rooty() + self.px(42))
+
+    def popup_menu(self, menu, x, y):
+        self.menu_open = True
+        self.hide_tooltip()
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+            self.menu_open = False
+            self.hide_tooltip()
 
     def toggle_topmost(self):
         self.topmost = not self.topmost
@@ -741,6 +914,7 @@ class UsagePanel:
         if "button" in self.canvas.gettags("current"):
             self.drag_origin = None
             return
+        self.pressed_action = None
         self.hide_tooltip()
         self.drag_origin = (event.x_root, event.y_root, self.root.winfo_x(), self.root.winfo_y())
 
@@ -750,6 +924,7 @@ class UsagePanel:
             self.root.geometry(f"+{x+event.x_root-sx}+{y+event.y_root-sy}")
 
     def drag_end(self, _event):
+        self.pressed_action = None
         if self.drag_origin:
             self.drag_origin = None
             self.root.update_idletasks()
@@ -768,10 +943,7 @@ class UsagePanel:
         menu.add_command(label="启动设置…", command=self.open_launcher)
         menu.add_separator()
         menu.add_command(label="退出", command=self.close)
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
+        self.popup_menu(menu, event.x_root, event.y_root)
 
     def open_launcher(self):
         import subprocess
@@ -779,17 +951,27 @@ class UsagePanel:
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          creationflags=subprocess.CREATE_NO_WINDOW)
 
-    def copy_stats(self):
-        usage = self.snapshot.total if self.mode == "total" else self.snapshot.last
+    def stats_text(self):
+        usage = self.current_usage
         rate = "—" if usage.cache_rate is None else f"{usage.cache_rate:.2f}%"
-        summary = (f"Codex {'会话累计' if self.mode == 'total' else '最近调用'}\n"
-                   f"会话：{self.snapshot.session_id}\n输入：{exact(usage.input_tokens)} tokens\n"
-                   f"缓存命中：{exact(usage.cached_input_tokens)} tokens（{rate}）\n"
-                   f"输出：{exact(usage.output_tokens)} tokens\n合计：{exact(usage.total_tokens)} tokens\n"
-                   f"本轮最近调用平均生成速度：{speed_label(self.snapshot.speed)} tok/s（本地记录估算）\n"
-                   f"记录时间：{timestamp_label(self.snapshot.timestamp)}")
+        state, reason, _ = self.state()
+        return (f"Codex 用量统计\n统计范围：{self.scope_label}\n"
+                f"聊天：{self.session_name()}\n会话 ID：{self.snapshot.session_id or '—'}\n"
+                f"状态：{state}（{reason}）\n单位：tokens\n"
+                f"输入总量：{exact(usage.input_tokens)}\n  已缓存：{exact(usage.cached_input_tokens)}\n"
+                f"  未缓存：{exact(usage.uncached_input)}\n输出总量：{exact(usage.output_tokens)}\n"
+                f"  其中推理：{exact(usage.reasoning_output_tokens)}\n总用量（输入 + 输出）：{exact(usage.total_tokens)}\n"
+                f"缓存命中率：{rate}（已缓存 ÷ 输入）\n{self.call_summary()}\n"
+                "速度口径：本轮最近一次已结算调用的平均生成速度，不随统计范围切换；≈ 为本地记录估算，非逐 token 瞬时速度。"
+                "包含推理和工具参数输出，不计工具执行等待。\n"
+                "会话累计用量不代表当前上下文占用；缓存属于输入，推理属于输出；— 表示缺少有效数据。\n"
+                f"数据时间（用量统计记录，本地时区）：{timestamp_label(self.snapshot.timestamp)}")
+
+    def copy_stats(self):
         self.root.clipboard_clear()
-        self.root.clipboard_append(summary)
+        self.root.clipboard_append(self.stats_text())
+        self.copy_until = time.monotonic() + 1.8
+        self.canvas.itemconfigure("copy_label", text="已复制")
 
     def select_session(self, path):
         self.path = Path(path)

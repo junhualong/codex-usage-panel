@@ -28,6 +28,8 @@ class Selection:
     route: str = ""
     message: str = "正在识别当前聊天"
     source_log: str = ""
+    loading: bool = False
+    error: str = ""
 
 
 def parse_route_event(line, window_id=1):
@@ -150,8 +152,8 @@ class RouteLog:
                     if event is not None and (self.latest is None or event[0] >= self.latest[0]):
                         self.latest = event
                 return self.latest, self.offset < stat.st_size, ""
-        except OSError:
-            return self.latest, False, "导航日志暂不可读"
+        except OSError as exc:
+            return self.latest, False, f"导航日志读取失败：{exc.strerror or type(exc).__name__}"
 
 
 class SessionResolver:
@@ -255,9 +257,9 @@ class DesktopSessionFollower:
             if event:
                 events.append((event[0], event[1], str(path)))
         if errors:
-            return Selection(message="导航日志暂不可读，等待恢复")
+            return Selection(error="；".join(dict.fromkeys(errors)))
         if loading:
-            return Selection(message="正在读取界面导航记录")
+            return Selection(message="正在读取界面导航记录", loading=True)
         if not events:
             return Selection(message="等待当前聊天的导航记录")
         _, route, source_log = max(events, key=lambda item: item[0])

@@ -8,16 +8,24 @@ Windows 桌面上的 Codex 本地用量面板：自动跟随主窗口当前聊�
 
 使用 **Windows 10 / 11 x64** 和本机 Codex 桌面应用。便携包内置运行环境，无需安装 Python、PowerShell 7 或其他依赖，也无需管理员权限。
 
-1. 获取 `CodexUsagePanel-v1.0.0-windows-x64.zip`，把整个 `CodexUsagePanel` 文件夹解压到固定位置。
+1. 获取 `CodexUsagePanel-v1.0.1-windows-x64.zip`，把整个 `CodexUsagePanel` 文件夹解压到固定位置。
 2. 双击 `CodexUsagePanel.exe`。入口会启动后台监听；Codex 已打开时显示面板，否则等待 Codex 打开。
 3. 如需重启电脑后自动使用，勾选“登录 Windows 后自动待命，随 Codex 打开和关闭面板”。
 4. 可点击“创建桌面快捷方式”。关闭启动设置窗口后，后台监听继续运行。
 
 **不要只复制 EXE。** 同目录的 `_internal` 是运行所需组件。更新时先用“停止面板与监听”，再完整替换程序文件夹。移动目录前先取消旧位置的自动启动，再从新位置启用；不同安装的启动项不会相互覆盖。
 
-项目：[junhualong/codex-usage-panel](https://github.com/junhualong/codex-usage-panel)。发布 ZIP 适合放在 GitHub Releases 的附件中；源码的“Download ZIP”不能代替便携包。仓库也提供手动运行的 GitHub Actions 构建流程，产物在该次运行的 Artifacts 中。
+项目：[junhualong/codex-usage-panel](https://github.com/junhualong/codex-usage-panel)。从 [Releases](https://github.com/junhualong/codex-usage-panel/releases) 下载便携 ZIP，旧版本也保留在该页面；源码的“Download ZIP”不能代替便携包。仓库也提供手动运行的 GitHub Actions 构建流程，产物在该次运行的 Artifacts 中。
 
 当前构建未做数字签名。支持目标为 Windows 10/11 x64；本地已验证 Windows 11，尚未完成其他电脑或干净虚拟机上的验收。
+
+## v1.0.1 更新
+
+- 统计范围改为“会话累计 / 最近调用”菜单，均速口径、缓存率与复制内容更明确。
+- 重组输入/输出明细，增加数据时间、统计口径提示、复制反馈及置顶选中样式。
+- 区分等待、读取、生成、空闲和读取失败，异常时保留已识别的聊天名称。
+- 修复屏幕底部点击展开后收起的位置恢复，并避免拖动释放时误触按钮。
+- 保留原有统计计算、自动跟随、启动/关闭联动和用户设置；升级仍使用完整替换程序文件夹的方式。
 
 ## 自动识别与设置
 
@@ -44,12 +52,16 @@ Windows 桌面上的 Codex 本地用量面板：自动跟随主窗口当前聊�
 
 ## 面板和统计口径
 
-- 累计/单次：切换会话累计与最近一次模型调用。
-- 总 token = 输入 + 输出；缓存输入已包含在输入中，推理输出已包含在输出中。
+- 点击“会话累计 / 最近调用”文字或下拉箭头打开范围菜单，当前选项有标记；选择后保存偏好，并同步用量、缓存命中率、明细、悬浮说明和复制内容。最近调用指一次模型调用。
+- 明细按输入与输出分列：输入总量下的“已缓存 / 未缓存”是输入子项，输出总量下的“其中推理”是输出子项；底部独立显示总用量 = 输入 + 输出。区域单位为 tokens，精确数值使用千位分隔。
 - 缓存命中率 = 缓存命中输入 / 输入。没有有效计数时显示“—”。
-- `≈ tok/s` 为本轮最近一次已结算调用的平均输出速度，包含推理与工具参数输出，排除工具执行时间。它不是逐 token 的瞬时速度。
+- “均速 `≈ tok/s`”始终为本轮最近一次已结算调用的平均生成速度，不随统计范围切换。它包含推理与工具参数输出，不计工具执行等待，属于本地记录估算，并非逐 token 瞬时速度。
 - 每轮开始清空上一轮速度，缺少计时信息的日志显示“—”。日志通常在模型调用结束后写入计数。
-- 点“明细”展开，再点“收起”返回原来的紧凑位置；靠近底部时向上展开。拖动空白处移动，右键可打开启动设置。
+- “跟随中”是状态标识，悬停查看跟随方式及完整聊天名称；固定模式显示“固定会话”。这个标识不展开面板。
+- 点“明细”展开，再点“收起”或按 Esc 返回原来的紧凑位置；靠近底部时向上展开。拖动空白处移动，置顶开启时按钮有选中底色，右键可打开启动设置。
+- 展开区保留最近调用摘要；“统计口径 ⓘ”悬浮说明集中解释公式、计数范围和刷新机制。“数据时间”是用量统计记录时间，悬停可看完整日期时间及本地时区；相对时间随界面刷新，空闲期间保留上次有效记录。
+- “复制统计”与右键“复制当前统计”复制所选范围的精确用量、缓存命中率、速度口径和数据时间；按钮会短暂显示“已复制”。
+- 尚未识别本地聊天显示“等待会话”，读取历史或导航记录时显示“读取中”，尚无用量记录时显示“等待统计”。生成状态依据任务事件；正常空闲显示“等待新的调用”。实际读取错误显示“读取失败”，明细提供原因，悬停可查看完整说明。长时间没有新统计不会被判为连接异常。
 - 关闭 Codex 主窗口后面板通常在约 1～2 秒内退出；后台监听继续等待重开。最小化 Codex 不关闭面板。
 - 手动关闭面板后，本次 Codex 打开期间不会反复弹出；可用入口的“启动 / 显示面板”重新显示。
 
@@ -98,7 +110,7 @@ python -m venv .local\build-venv
 构建产物：
 
 - `dist/CodexUsagePanel/`：可直接运行的完整文件夹。
-- `dist/CodexUsagePanel-v1.0.0-windows-x64.zip`：给其他人的便携包。
+- `dist/CodexUsagePanel-v1.0.1-windows-x64.zip`：给其他人的便携包。
 - `dist/SHA256SUMS.txt`：ZIP 的 SHA-256 校验值。
 
 构建只收集程序、运行时和允许分发的说明文件，并检查个人配置、会话日志是否误入包。中间文件放在 `.local/build`；`.local`、`dist`、本机配置和快捷方式都被 Git 忽略。第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，本项目自身的开源许可证尚未选择。
@@ -109,12 +121,16 @@ python -m venv .local\build-venv
 
 ```powershell
 python -B -X utf8 tests\gui_lifecycle_test.py
+python -B -X utf8 tests\gui_follow_test.py
+python -B -X utf8 tests\gui_panel_test.py
 python -B -X utf8 tests\test_panel_geometry.py
 python -B -X utf8 tests\test_restart_survival.py
 python -B -X utf8 tests\test_portable.py
 ```
 
 其中进程生命周期的源码测试使用常规 Python 安装运行；虚拟环境的 `pythonw.exe` 重定向进程会改变测试中的 PID 关系。重启生存测试要求 Codex 保持打开，只结束自己创建的测试 Job，不关闭真实 Codex。便携包测试需先完成构建。
+
+`gui_panel_test.py` 检查范围菜单、复制反馈、六种显示状态、长名称/大数值、100%～200% 布局与点击区域，以及屏幕边缘的展开/收起位置恢复；结果样本位于 `.local/tests/panel-ui-fixtures`。加 `--preview` 可打开合成数据预览，供人工检查排版，不读取真实聊天。
 
 无法启动时查看数据目录内的 `launcher-error.log`；旧入口可能使用 `autostart-error.log`，面板回调错误使用 `panel-error.log`。自定义 Codex 数据目录且未继承环境变量时，在配置中显式填写 `codex_home`。
 
