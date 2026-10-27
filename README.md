@@ -8,7 +8,7 @@ Windows 桌面上的 Codex 本地用量面板：自动跟随主窗口当前聊�
 
 使用 **Windows 10 / 11 x64** 和本机 Codex 桌面应用。便携包内置运行环境，无需安装 Python、PowerShell 7 或其他依赖，也无需管理员权限。
 
-1. 获取 `CodexUsagePanel-v1.0.1-windows-x64.zip`，把整个 `CodexUsagePanel` 文件夹解压到固定位置。
+1. 获取 `CodexUsagePanel-v1.0.2-windows-x64.zip`，把整个 `CodexUsagePanel` 文件夹解压到固定位置。
 2. 双击 `CodexUsagePanel.exe`。入口会启动后台监听；Codex 已打开时显示面板，否则等待 Codex 打开。
 3. 如需重启电脑后自动使用，勾选“登录 Windows 后自动待命，随 Codex 打开和关闭面板”。
 4. 可点击“创建桌面快捷方式”。关闭启动设置窗口后，后台监听继续运行。
@@ -18,6 +18,13 @@ Windows 桌面上的 Codex 本地用量面板：自动跟随主窗口当前聊�
 项目：[junhualong/codex-usage-panel](https://github.com/junhualong/codex-usage-panel)。从 [Releases](https://github.com/junhualong/codex-usage-panel/releases) 下载便携 ZIP，旧版本也保留在该页面；源码的“Download ZIP”不能代替便携包。仓库也提供手动运行的 GitHub Actions 构建流程，产物在该次运行的 Artifacts 中。
 
 当前构建未做数字签名。支持目标为 Windows 10/11 x64；本地已验证 Windows 11，尚未完成其他电脑或干净虚拟机上的验收。
+
+## v1.0.2 更新
+
+- 修复从部分应用环境启用自动启动后，程序显示已注册、但 Windows 登录时没有启动监听的问题。
+- 自动启动项通过 Windows WMI 读写并复核，启用状态以 Windows 实际可见的记录为准；保留不同安装之间的冲突保护。
+- 增加独立 Windows 进程验证，覆盖注册、重复启用和取消；沿用原有面板、统计计算及 Codex 打开/关闭联动。
+- 升级后，在新入口中重新勾选自动启动一次；也可执行 `CodexUsagePanel.exe --install`，然后执行 `CodexUsagePanel.exe --start`。
 
 ## v1.0.1 更新
 
@@ -96,6 +103,8 @@ python -B -X utf8 launcher.py
 
 `--install` 只注册本用户登录启动；`--start` 启动监听；`--disable` 取消该安装的登录启动并停止监听，现有面板可用 `--shutdown` 退出。诊断报告包含本机路径，分享前请自行检查。
 
+自动启动设置通过 Windows WMI 读取、写入并复核本用户的登录启动项，避免从打包应用内部启动时，私有注册表视图造成“已启用但系统未注册”。如果旧版勾选过却在重启电脑后没有启动，使用修复后的入口重新启用一次，或执行 `--install`，再执行 `--start` 即可恢复；不需要管理员权限。
+
 ## 构建便携包
 
 在仓库目录建立本地构建环境：
@@ -110,7 +119,7 @@ python -m venv .local\build-venv
 构建产物：
 
 - `dist/CodexUsagePanel/`：可直接运行的完整文件夹。
-- `dist/CodexUsagePanel-v1.0.1-windows-x64.zip`：给其他人的便携包。
+- `dist/CodexUsagePanel-v1.0.2-windows-x64.zip`：给其他人的便携包。
 - `dist/SHA256SUMS.txt`：ZIP 的 SHA-256 校验值。
 
 构建只收集程序、运行时和允许分发的说明文件，并检查个人配置、会话日志是否误入包。中间文件放在 `.local/build`；`.local`、`dist`、本机配置和快捷方式都被 Git 忽略。第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，本项目自身的开源许可证尚未选择。
@@ -125,13 +134,16 @@ python -B -X utf8 tests\gui_follow_test.py
 python -B -X utf8 tests\gui_panel_test.py
 python -B -X utf8 tests\test_panel_geometry.py
 python -B -X utf8 tests\test_restart_survival.py
+python -B -X utf8 tests\test_startup_registration.py
 python -B -X utf8 tests\test_portable.py
 ```
 
 其中进程生命周期的源码测试使用常规 Python 安装运行；虚拟环境的 `pythonw.exe` 重定向进程会改变测试中的 PID 关系。重启生存测试要求 Codex 保持打开，只结束自己创建的测试 Job，不关闭真实 Codex。便携包测试需先完成构建。
 
+`test_startup_registration.py` 使用独立配置和独立 Windows 进程，验证自动启动项的启用、重复启用和取消在系统中真正生效；不改当前使用的启动项，也不关闭 Codex。可通过 `--exe <完整路径>` 验证重新构建的便携 EXE。
+
 `gui_panel_test.py` 检查范围菜单、复制反馈、六种显示状态、长名称/大数值、100%～200% 布局与点击区域，以及屏幕边缘的展开/收起位置恢复；结果样本位于 `.local/tests/panel-ui-fixtures`。加 `--preview` 可打开合成数据预览，供人工检查排版，不读取真实聊天。
 
 无法启动时查看数据目录内的 `launcher-error.log`；旧入口可能使用 `autostart-error.log`，面板回调错误使用 `panel-error.log`。自定义 Codex 数据目录且未继承环境变量时，在配置中显式填写 `codex_home`。
 
-后台进程通过 [Windows WMI](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/create-method-in-class-win32-process) 独立启动，避免被调用方的 Job 一同终止；打包目录依据 [PyInstaller 运行时路径规则](https://pyinstaller.org/en/stable/runtime-information.html) 区分程序与用户数据。
+后台进程通过 [Windows WMI](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/create-method-in-class-win32-process) 独立启动，避免被调用方的 Job 一同终止；登录启动项通过 [WMI 注册表提供程序](https://learn.microsoft.com/en-us/windows/win32/wmisdk/wmi-tasks--registry) 操作本用户的 Windows 注册表；打包目录依据 [PyInstaller 运行时路径规则](https://pyinstaller.org/en/stable/runtime-information.html) 区分程序与用户数据。

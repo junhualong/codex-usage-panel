@@ -108,12 +108,43 @@ def start_independent():
     raise RuntimeError("Independent watcher did not report ready within 10 seconds")
 
 
-def registration():
+def _startup_registry(method, **values):
+    """Use Windows' registry view, not a packaged caller's private HKCU view."""
+    import pythoncom
+    from win32com.client import dynamic
+
+    pythoncom.CoInitialize()
+    locator = service = registry = parameters = result = None
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-            return winreg.QueryValueEx(key, RUN_NAME)[0]
-    except FileNotFoundError:
-        return None
+        locator = dynamic.Dispatch("WbemScripting.SWbemLocator")
+        service = locator.ConnectServer(".", r"root\default")
+        # Local impersonation keeps the operation scoped to the current user.
+        service.Security_.ImpersonationLevel = 3
+        registry = service.Get("StdRegProv")
+        parameters = registry.Methods_.Item(method).InParameters.SpawnInstance_()
+        for name, value in dict(hDefKey=0x80000001, sSubKeyName=RUN_KEY, **values).items():
+            parameters.Properties_.Item(name).Value = value
+        result = registry.ExecMethod_(method, parameters)
+        code = int(result.Properties_.Item("ReturnValue").Value)
+        if method == "EnumValues" and code == 2:  # A new user may not have a Run key yet.
+            return {"sNames": (), "Types": ()}
+        if code:
+            raise OSError(code, f"Windows 登录启动项 {method} 失败：{ctypes.FormatError(code).strip()}")
+        return {item.Name: item.Value for item in result.Properties_ if item.Name != "ReturnValue"}
+    finally:
+        result = parameters = registry = service = locator = None
+        pythoncom.CoUninitialize()
+
+
+def registration():
+    values = _startup_registry("EnumValues")
+    for name, kind in zip(values.get("sNames") or (), values.get("Types") or ()):
+        if name.casefold() == RUN_NAME.casefold():
+            # Enumerate first: GetStringValue uses a generic failure for a missing value.
+            if kind != winreg.REG_SZ:
+                raise RuntimeError("登录启动项类型不符；保留原记录，请检查是否来自其他安装")
+            return _startup_registry("GetStringValue", sValueName=RUN_NAME)["sValue"]
+    return None
 
 
 def install():
@@ -121,9 +152,11 @@ def install():
     existing = registration()
     if existing is not None and existing != command:
         raise RuntimeError("The startup entry already belongs to a different installation")
-    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
-        winreg.SetValueEx(key, RUN_NAME, 0, winreg.REG_SZ, command)
-    return {"installed": registration() == command, "scope": "current-user", "name": RUN_NAME, "command": command}
+    _startup_registry("CreateKey")
+    _startup_registry("SetStringValue", sValueName=RUN_NAME, sValue=command)
+    if registration() != command:
+        raise RuntimeError("Windows 登录启动项写入后校验失败，请重新启用自动启动")
+    return {"installed": True, "scope": "current-user", "name": RUN_NAME, "command": command}
 
 
 def kernel_api():
@@ -206,9 +239,10 @@ def unregister():
     if existing is not None:
         if existing != startup_command():
             raise RuntimeError("Startup entry changed; refusing to remove a different installation")
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
-            winreg.DeleteValue(key, RUN_NAME)
-    return {"disabled": registration() is None}
+        _startup_registry("DeleteValue", sValueName=RUN_NAME)
+    if registration() is not None:
+        raise RuntimeError("Windows 登录启动项移除后校验失败，请重试")
+    return {"disabled": True}
 
 
 def disable():
