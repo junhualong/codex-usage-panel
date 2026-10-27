@@ -8,7 +8,7 @@ Windows 桌面上的 Codex 本地用量面板：自动跟随主窗口当前聊�
 
 使用 **Windows 10 / 11 x64** 和本机 Codex 桌面应用。便携包内置运行环境，无需安装 Python、PowerShell 7 或其他依赖，也无需管理员权限。
 
-1. 获取 `CodexUsagePanel-v1.0.2-windows-x64.zip`，把整个 `CodexUsagePanel` 文件夹解压到固定位置。
+1. 获取 `CodexUsagePanel-v1.0.3-windows-x64.zip`，把整个 `CodexUsagePanel` 文件夹解压到固定位置。
 2. 双击 `CodexUsagePanel.exe`。入口会启动后台监听；Codex 已打开时显示面板，否则等待 Codex 打开。
 3. 如需重启电脑后自动使用，勾选“登录 Windows 后自动待命，随 Codex 打开和关闭面板”。
 4. 可点击“创建桌面快捷方式”。关闭启动设置窗口后，后台监听继续运行。
@@ -18,6 +18,13 @@ Windows 桌面上的 Codex 本地用量面板：自动跟随主窗口当前聊�
 项目：[junhualong/codex-usage-panel](https://github.com/junhualong/codex-usage-panel)。从 [Releases](https://github.com/junhualong/codex-usage-panel/releases) 下载便携 ZIP，旧版本也保留在该页面；源码的“Download ZIP”不能代替便携包。仓库也提供手动运行的 GitHub Actions 构建流程，产物在该次运行的 Artifacts 中。
 
 当前构建未做数字签名。支持目标为 Windows 10/11 x64；本地已验证 Windows 11，尚未完成其他电脑或干净虚拟机上的验收。
+
+## v1.0.3 更新
+
+- 移动、缩放及展开面板时限制在显示器可用工作区内；启动或屏幕布局变化后自动找回越界窗口。
+- 四条边和四个角均可拖动，文字、数值和按钮按比例缩放；右下角增加缩放标记。
+- 保存窗口大小，右键菜单增加“恢复默认大小”；保留靠近底部向上展开和收起后的紧凑位置恢复。
+- 保留统计口径、自动跟随和 v1.0.2 的自动启动修复；升级仍采用停止监听后完整替换程序文件夹的方式。
 
 ## v1.0.2 更新
 
@@ -66,6 +73,8 @@ Windows 桌面上的 Codex 本地用量面板：自动跟随主窗口当前聊�
 - 每轮开始清空上一轮速度，缺少计时信息的日志显示“—”。日志通常在模型调用结束后写入计数。
 - “跟随中”是状态标识，悬停查看跟随方式及完整聊天名称；固定模式显示“固定会话”。这个标识不展开面板。
 - 点“明细”展开，再点“收起”或按 Esc 返回原来的紧凑位置；靠近底部时向上展开。拖动空白处移动，置顶开启时按钮有选中底色，右键可打开启动设置。
+- 面板移动和缩放时限制在所在显示器的可用工作区内，避开任务栏；启动或屏幕布局变化后会自动找回越界窗口。多屏拖动时以鼠标所在屏幕为目标。
+- 拖动边缘或四角可按比例放大、缩小，文字和按钮一起缩放；右下角有缩放标记。大小随位置一起记住，右键“恢复默认大小”可重置。常规缩放范围为系统 DPI 基准的 80%～200%，上限受屏幕工作区限制，小屏时会自动适配；展开和收起使用相同缩放比例。
 - 展开区保留最近调用摘要；“统计口径 ⓘ”悬浮说明集中解释公式、计数范围和刷新机制。“数据时间”是用量统计记录时间，悬停可看完整日期时间及本地时区；相对时间随界面刷新，空闲期间保留上次有效记录。
 - “复制统计”与右键“复制当前统计”复制所选范围的精确用量、缓存命中率、速度口径和数据时间；按钮会短暂显示“已复制”。
 - 尚未识别本地聊天显示“等待会话”，读取历史或导航记录时显示“读取中”，尚无用量记录时显示“等待统计”。生成状态依据任务事件；正常空闲显示“等待新的调用”。实际读取错误显示“读取失败”，明细提供原因，悬停可查看完整说明。长时间没有新统计不会被判为连接异常。
@@ -119,7 +128,7 @@ python -m venv .local\build-venv
 构建产物：
 
 - `dist/CodexUsagePanel/`：可直接运行的完整文件夹。
-- `dist/CodexUsagePanel-v1.0.2-windows-x64.zip`：给其他人的便携包。
+- `dist/CodexUsagePanel-v1.0.3-windows-x64.zip`：给其他人的便携包。
 - `dist/SHA256SUMS.txt`：ZIP 的 SHA-256 校验值。
 
 构建只收集程序、运行时和允许分发的说明文件，并检查个人配置、会话日志是否误入包。中间文件放在 `.local/build`；`.local`、`dist`、本机配置和快捷方式都被 Git 忽略。第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，本项目自身的开源许可证尚未选择。
@@ -132,6 +141,7 @@ python -m venv .local\build-venv
 python -B -X utf8 tests\gui_lifecycle_test.py
 python -B -X utf8 tests\gui_follow_test.py
 python -B -X utf8 tests\gui_panel_test.py
+python -B -X utf8 tests\gui_window_test.py
 python -B -X utf8 tests\test_panel_geometry.py
 python -B -X utf8 tests\test_restart_survival.py
 python -B -X utf8 tests\test_startup_registration.py
@@ -142,7 +152,9 @@ python -B -X utf8 tests\test_portable.py
 
 `test_startup_registration.py` 使用独立配置和独立 Windows 进程，验证自动启动项的启用、重复启用和取消在系统中真正生效；不改当前使用的启动项，也不关闭 Codex。可通过 `--exe <完整路径>` 验证重新构建的便携 EXE。
 
-`gui_panel_test.py` 检查范围菜单、复制反馈、六种显示状态、长名称/大数值、100%～200% 布局与点击区域，以及屏幕边缘的展开/收起位置恢复；结果样本位于 `.local/tests/panel-ui-fixtures`。加 `--preview` 可打开合成数据预览，供人工检查排版，不读取真实聊天。
+`gui_panel_test.py` 检查范围菜单、复制反馈、六种显示状态、长名称/大数值、80%～200% 布局与点击区域，以及屏幕边缘的展开/收起位置恢复；结果样本位于 `.local/tests/panel-ui-fixtures`。加 `--preview` 可打开合成数据预览，供人工检查排版，不读取真实聊天。
+
+`gui_window_test.py` 用隔离的 Tk 窗口验证四边约束、八个缩放方向、最小/最大尺寸、缩放记忆、展开收起锚点和屏幕变化后的恢复；负坐标屏幕、任务栏预留和小屏高 DPI 使用模拟工作区，不代替实际多显示器验收。
 
 无法启动时查看数据目录内的 `launcher-error.log`；旧入口可能使用 `autostart-error.log`，面板回调错误使用 `panel-error.log`。自定义 Codex 数据目录且未继承环境变量时，在配置中显式填写 `codex_home`。
 

@@ -7,6 +7,7 @@ from ctypes import wintypes
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -330,12 +331,35 @@ def enable_dpi():
             pass
 
 
-def work_area(root):
+class MonitorInfo(ctypes.Structure):
+    _fields_ = [("size", wintypes.DWORD), ("monitor", wintypes.RECT),
+                ("work", wintypes.RECT), ("flags", wintypes.DWORD)]
+
+
+def work_area(root, bounds=None):
+    """Use the nearest monitor's usable desktop, including negative coordinates."""
     if os.name == "nt":
+        if bounds is None:
+            x, y = root.winfo_x(), root.winfo_y()
+            bounds = (x, y, x + root.winfo_width(), y + root.winfo_height())
+        user = ctypes.windll.user32
+        user.MonitorFromRect.argtypes = [ctypes.POINTER(wintypes.RECT), wintypes.DWORD]
+        user.MonitorFromRect.restype = wintypes.HANDLE
+        user.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MonitorInfo)]
+        rect = wintypes.RECT(*bounds)
+        monitor = user.MonitorFromRect(ctypes.byref(rect), 2)  # MONITOR_DEFAULTTONEAREST
+        info = MonitorInfo(size=ctypes.sizeof(MonitorInfo))
+        if monitor and user.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return info.work.left, info.work.top, info.work.right, info.work.bottom
         rect = wintypes.RECT()
-        if ctypes.windll.user32.SystemParametersInfoW(48, 0, ctypes.byref(rect), 0):
+        if user.SystemParametersInfoW(48, 0, ctypes.byref(rect), 0):
             return rect.left, rect.top, rect.right, rect.bottom
     return 0, 0, root.winfo_screenwidth(), root.winfo_screenheight()
+
+
+def clamp_position(x, y, width, height, area):
+    left, top, right, bottom = area
+    return (max(left, min(int(x), right - width)), max(top, min(int(y), bottom - height)))
 
 
 def singleton():
@@ -361,6 +385,10 @@ class UsagePanel:
     WIDTH = 840
     BAR_HEIGHT = 48
     EXPANDED_HEIGHT = 364
+    MIN_ZOOM = 0.8
+    MAX_ZOOM = 2.0
+    RESIZE_CURSORS = {"n": "size_ns", "s": "size_ns", "e": "size_we", "w": "size_we",
+                      "nw": "size_nw_se", "se": "size_nw_se", "ne": "size_ne_sw", "sw": "size_ne_sw"}
 
     def __init__(self, root, config, state_dir, session_override=None, close_signal=None):
         self.root = root
@@ -402,6 +430,12 @@ class UsagePanel:
         self.fonts = {}
         self.poll_job = None
         self.drag_origin = None
+        self.resize_origin = None
+        try:
+            zoom = float(self.saved.get("zoom", 1.0))
+        except (TypeError, ValueError):
+            zoom = 1.0
+        self.zoom = max(self.MIN_ZOOM, min(zoom, self.MAX_ZOOM)) if math.isfinite(zoom) else 1.0
         root.withdraw()
         root.title(APP_TITLE)
         root.configure(bg=TRANSPARENT)
@@ -409,23 +443,23 @@ class UsagePanel:
         root.attributes("-topmost", self.topmost)
         if os.name == "nt":
             root.attributes("-transparentcolor", TRANSPARENT)
-        self.scale = max(1.0, root.winfo_fpixels("1i") / 96.0)
+        self.dpi_scale = max(1.0, root.winfo_fpixels("1i") / 96.0)
+        self.scale = self.dpi_scale * self.zoom
         self.canvas = tk.Canvas(root, bg=TRANSPARENT, highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
         left, top, right, bottom = work_area(root)
         width, height = self.px(self.WIDTH), self.px(self.BAR_HEIGHT)
         x = int(self.saved.get("x", right - width - self.px(24)))
         y = int(self.saved.get("y", bottom - height - self.px(24)))
-        # Recover windows saved beyond the current primary desktop.
-        x = max(left, min(x, right - width))
-        y = max(top, min(y, bottom - height))
         self.compact_position = (x, y)
-        root.geometry(f"{width}x{height}+{x}+{y}")
+        self.last_work_area = None
+        self.place_window(x, y)
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.bind("<Escape>", lambda _e: self.set_expanded(False))
         self.canvas.bind("<ButtonPress-1>", self.drag_start)
         self.canvas.bind("<B1-Motion>", self.drag_motion)
         self.canvas.bind("<ButtonRelease-1>", self.drag_end)
+        self.canvas.bind("<Motion>", self.pointer_motion)
         self.canvas.bind("<Button-3>", self.context_menu)
         self.render()
         root.deiconify()
@@ -439,6 +473,78 @@ class UsagePanel:
 
     def px(self, value):
         return int(round(value * self.scale))
+
+    def limited_scale(self, scale, area):
+        left, top, right, bottom = area
+        # Both views must fit at the same zoom, so expanding never clips controls.
+        maximum = min(self.dpi_scale * self.MAX_ZOOM,
+                      (right - left) / self.WIDTH, (bottom - top) / self.EXPANDED_HEIGHT)
+        minimum = min(self.dpi_scale * self.MIN_ZOOM, maximum)
+        return max(minimum, min(scale, maximum))
+
+    def place_window(self, x, y, scale=None, area=None):
+        height = self.EXPANDED_HEIGHT if self.expanded else self.BAR_HEIGHT
+        if area is None:
+            area = work_area(self.root, (int(x), int(y), int(x) + self.px(self.WIDTH), int(y) + self.px(height)))
+        if scale is None:
+            scale = self.dpi_scale * self.zoom if area != self.last_work_area else self.scale
+        scale = self.limited_scale(scale, area)
+        scaled = not math.isclose(scale, self.scale)
+        if scaled:
+            self.scale = scale
+            self.fonts.clear()
+        width, height = self.px(self.WIDTH), self.px(height)
+        x, y = clamp_position(x, y, width, height, area)
+        target = (x, y, width, height)
+        current = (self.root.winfo_x(), self.root.winfo_y(), self.root.winfo_width(), self.root.winfo_height())
+        if target != current:
+            self.root.geometry(f"{width}x{height}+{x}+{y}")
+        self.last_work_area = area
+        anchor = self.compact_position if self.expanded else (x, y)
+        self.compact_position = clamp_position(*anchor, width, self.px(self.BAR_HEIGHT), area)
+        return target != current or scaled
+
+    def ensure_visible(self):
+        if self.drag_origin or self.resize_origin or not self.root.winfo_ismapped():
+            return
+        if self.place_window(self.root.winfo_x(), self.root.winfo_y()):
+            self.render()
+            self.save_settings()
+
+    def resize_edge(self, x, y):
+        width, height = self.px(self.WIDTH), self.px(self.EXPANDED_HEIGHT if self.expanded else self.BAR_HEIGHT)
+        margin, corner = max(4, self.px(5)), max(8, self.px(10))
+        if not (0 <= x <= width and 0 <= y <= height):
+            return ""
+        horizontal = "w" if x <= corner else "e" if x >= width - corner else ""
+        vertical = "n" if y <= corner else "s" if y >= height - corner else ""
+        if horizontal and vertical:
+            return vertical + horizontal
+        if x <= margin:
+            return "w"
+        if x >= width - margin:
+            return "e"
+        if y <= margin:
+            return "n"
+        if y >= height - margin:
+            return "s"
+        return ""
+
+    def pointer_motion(self, event):
+        edge = self.resize_origin[0] if self.resize_origin else self.resize_edge(event.x, event.y)
+        if edge:
+            self.hide_tooltip()
+            self.canvas.configure(cursor=self.RESIZE_CURSORS[edge])
+        elif self.drag_origin:
+            self.canvas.configure(cursor="fleur")
+        else:
+            self.canvas.configure(cursor="hand2" if "button" in self.canvas.gettags("current") else "")
+
+    def reset_size(self):
+        self.zoom = 1.0
+        self.place_window(self.root.winfo_x(), self.root.winfo_y(), self.dpi_scale)
+        self.render()
+        self.save_settings()
 
     def font(self, size=12, bold=False, mono=False):
         key = (size, bold, mono)
@@ -536,16 +642,16 @@ class UsagePanel:
     def action(self, tag, callback, help_text):
         # A press-time redraw removes Canvas's current item before drag_start runs.
         # Activate on release so a bottom-edge expansion cannot become a drag anchor.
-        self.canvas.tag_bind(tag, "<ButtonPress-1>", lambda _e: self.press_action(tag))
+        self.canvas.tag_bind(tag, "<ButtonPress-1>", lambda e: self.press_action(tag, e))
         self.canvas.tag_bind(tag, "<ButtonRelease-1>", lambda _e: self.release_action(tag, callback))
         self.hint(tag, help_text, True)
 
-    def press_action(self, tag):
-        self.pressed_action = tag
+    def press_action(self, tag, event):
+        self.pressed_action = None if self.resize_edge(event.x, event.y) else tag
 
     def release_action(self, tag, callback):
         pressed, self.pressed_action = self.pressed_action, None
-        if pressed == tag:
+        if pressed == tag and not self.drag_origin and not self.resize_origin:
             callback()
 
     def hitbox(self, x1, x2, tag, y1=6, y2=42, selected=False):
@@ -614,6 +720,10 @@ class UsagePanel:
         self.action("close", self.close, "关闭统计面板")
         if self.expanded:
             self.draw_details(usage)
+        self.line(self.WIDTH - 13, height - 4, self.WIDTH - 4, height - 13, MUTED, tags=("resize_grip",))
+        self.line(self.WIDTH - 8, height - 4, self.WIDTH - 4, height - 8, MUTED, tags=("resize_grip",))
+        if self.resize_origin:
+            self.canvas.configure(cursor=self.RESIZE_CURSORS[self.resize_origin[0]])
 
     def draw_speed(self):
         self.text(105, 24, "均速", MUTED, 11, tags=("speed",))
@@ -680,7 +790,7 @@ class UsagePanel:
 
     def hover(self, event, tag, clickable=False):
         self.hide_tooltip()
-        if self.menu_open:
+        if self.menu_open or self.resize_origin or self.drag_origin:
             return
         self.hovered_tag = tag
         if clickable:
@@ -826,6 +936,7 @@ class UsagePanel:
         if self.close_signal is not None and self.close_signal.pending():
             self.close(reason="codex_closed")
             return
+        self.ensure_visible()
         changed = False
         latest_selection = None
         try:
@@ -898,38 +1009,71 @@ class UsagePanel:
         self.root.update_idletasks()
         if expanded:
             self.compact_position = (self.root.winfo_x(), self.root.winfo_y())
+        area = work_area(self.root)
         self.expanded = expanded
-        height = self.px(self.EXPANDED_HEIGHT if expanded else self.BAR_HEIGHT)
-        left, top, right, bottom = work_area(self.root)
         x, y = self.compact_position
-        x = max(left, min(x, right - self.px(self.WIDTH)))
-        # Prefer expanding down; only move up when needed to fit the work area.
         # Collapse always returns to the saved compact anchor, never the expanded bottom edge.
-        y = max(top, min(y, bottom - height))
-        self.root.geometry(f"{self.px(self.WIDTH)}x{height}+{x}+{y}")
+        self.place_window(x, y, area=area)
         self.hide_tooltip()
         self.render()
 
     def drag_start(self, event):
+        self.root.update_idletasks()
+        edge = self.resize_edge(event.x, event.y)
+        if edge:
+            self.pressed_action = None
+            self.drag_origin = None
+            self.hide_tooltip()
+            self.resize_origin = (edge, event.x_root, event.y_root, self.root.winfo_x(), self.root.winfo_y(), self.scale)
+            self.canvas.grab_set()
+            self.canvas.configure(cursor=self.RESIZE_CURSORS[edge])
+            return
         if "button" in self.canvas.gettags("current"):
             self.drag_origin = None
             return
         self.pressed_action = None
         self.hide_tooltip()
         self.drag_origin = (event.x_root, event.y_root, self.root.winfo_x(), self.root.winfo_y())
+        self.canvas.grab_set()
+        self.canvas.configure(cursor="fleur")
 
     def drag_motion(self, event):
-        if self.drag_origin:
+        if self.resize_origin:
+            edge, sx, sy, x, y, original = self.resize_origin
+            height = self.EXPANDED_HEIGHT if self.expanded else self.BAR_HEIGHT
+            dx, dy = event.x_root - sx, event.y_root - sy
+            vx = -self.WIDTH if "w" in edge else self.WIDTH if "e" in edge else 0
+            vy = -height if "n" in edge else height if "s" in edge else 0
+            area = work_area(self.root)
+            scale = self.limited_scale(original + (dx * vx + dy * vy) / (vx * vx + vy * vy), area)
+            dw, dh = round(self.WIDTH * original) - round(self.WIDTH * scale), round(height * original) - round(height * scale)
+            x += dw if "w" in edge else dw // 2 if not vx else 0
+            y += dh if "n" in edge else dh // 2 if not vy else 0
+            self.zoom = max(self.MIN_ZOOM, min(scale / self.dpi_scale, self.MAX_ZOOM))
+            if self.place_window(x, y, scale, area):
+                self.render()
+        elif self.drag_origin:
             sx, sy, x, y = self.drag_origin
-            self.root.geometry(f"+{x+event.x_root-sx}+{y+event.y_root-sy}")
+            # The pointer selects the destination monitor, allowing bounded cross-screen moves.
+            area = work_area(self.root, (event.x_root, event.y_root, event.x_root + 1, event.y_root + 1))
+            old_scale = self.scale
+            self.place_window(x + event.x_root - sx, y + event.y_root - sy, area=area)
+            if self.scale != old_scale:
+                self.render()
 
     def drag_end(self, _event):
         self.pressed_action = None
-        if self.drag_origin:
+        if self.drag_origin or self.resize_origin:
+            moved = self.drag_origin is not None
             self.drag_origin = None
+            self.resize_origin = None
+            self.canvas.grab_release()
             self.root.update_idletasks()
-            self.compact_position = (self.root.winfo_x(), self.root.winfo_y())
+            if moved or not self.expanded:
+                self.compact_position = (self.root.winfo_x(), self.root.winfo_y())
+            self.ensure_visible()
             self.save_settings()
+            self.canvas.configure(cursor="")
 
     def context_menu(self, event):
         self.hide_tooltip()
@@ -939,6 +1083,7 @@ class UsagePanel:
         menu.add_command(label="切换到最近调用" if self.mode == "total" else "切换到会话累计", command=self.toggle_mode)
         menu.add_command(label="自动跟随当前聊天" if self.follow_enabled else "跟踪指定日志", state="disabled")
         menu.add_command(label="取消置顶" if self.topmost else "保持置顶", command=self.toggle_topmost)
+        menu.add_command(label="恢复默认大小", command=self.reset_size)
         menu.add_command(label="复制当前统计", command=self.copy_stats)
         menu.add_command(label="启动设置…", command=self.open_launcher)
         menu.add_separator()
@@ -996,6 +1141,8 @@ class UsagePanel:
         x, y = self.compact_position
         value = {"session": str(self.path), "mode": self.mode, "topmost": self.topmost,
                  "x": x, "y": y}
+        if not math.isclose(self.zoom, 1.0):
+            value["zoom"] = round(self.zoom, 6)
         temporary = self.state_dir / "settings.tmp"
         try:
             temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")

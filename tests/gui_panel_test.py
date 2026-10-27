@@ -191,7 +191,7 @@ class PanelGuiTests(unittest.TestCase):
     def test_layout_bounds_large_numbers_long_names_and_scaled_hit_areas(self):
         app = self.app
         checked = []
-        for scale in (1.0, 1.25, 1.5, 2.0):
+        for scale in (0.8, 1.0, 1.25, 1.5, 2.0):
             app.scale = scale
             app.fonts.clear()
             for expanded in (False, True):
