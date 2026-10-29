@@ -83,8 +83,8 @@ class PanelGuiTests(unittest.TestCase):
         app = self.app
         app.set_expanded(True)
         with patch.object(tk.Menu, "tk_popup") as popup:
-            for x in (268, 337):
-                self.click(x, 24)
+            for x in (280, 361):
+                self.click(x, 28)
                 self.assertIsNone(app.drag_origin)
                 menu = app.scope_menu
                 self.assertEqual(menu.entrycget(0, "label"), "会话累计")
@@ -112,7 +112,7 @@ class PanelGuiTests(unittest.TestCase):
         app = self.app
         app.set_expanded(True)
         app.set_mode("last")
-        self.click(773, 341)
+        self.click(app.WIDTH - 67, 349)
         copied = self.root.clipboard_get()
         self.assertEqual(copied, app.stats_text())
         self.assertIn("统计范围：最近调用", copied)
@@ -127,7 +127,7 @@ class PanelGuiTests(unittest.TestCase):
         app = self.app
         scenario(app, "空闲")
         self.assertEqual(self.text("follow"), ["跟随中"])
-        self.click(682, 24)
+        self.click(743, 28)
         self.assertFalse(app.expanded)
         self.assertFalse(app.canvas.tag_bind("follow", "<Button-1>"))
         for tag in ("scope", "details", "pin"):
@@ -137,12 +137,12 @@ class PanelGuiTests(unittest.TestCase):
             app.hide_tooltip()
             self.assertEqual(app.canvas.itemcget(tag + "_bg", "fill"), original)
         self.assertEqual(app.canvas.itemcget("pin_bg", "fill"), panel.SELECTED)
-        self.click(737, 24)
+        self.click(805, 28)
         self.assertFalse(app.topmost)
-        self.assertEqual(app.button_fills["pin"], panel.BACKGROUND)
-        self.click(778, 24)
+        self.assertEqual(app.button_fills["pin"], app.background)
+        self.click(846, 28)
         self.assertTrue(app.expanded)
-        self.click(778, 24)
+        self.click(846, 28)
         self.assertFalse(app.expanded)
 
     def test_states_and_idle_time_refresh_keep_last_record(self):
@@ -167,7 +167,7 @@ class PanelGuiTests(unittest.TestCase):
     def test_releasing_a_drag_over_buttons_does_not_activate_them(self):
         app = self.app
         canvas = app.canvas
-        for start_x, end_x in ((249, 778), (778, 737)):
+        for start_x, end_x in ((260, 846), (846, 805)):
             canvas.event_generate("<Motion>", x=app.px(start_x), y=app.px(24))
             canvas.event_generate("<ButtonPress-1>", x=app.px(start_x), y=app.px(24))
             canvas.event_generate("<Motion>", x=app.px(end_x), y=app.px(24))
@@ -216,7 +216,7 @@ class PanelGuiTests(unittest.TestCase):
                         boxes.append((box, text))
                     checked.append([scale, expanded, name])
                 with patch.object(tk.Menu, "tk_popup") as popup:
-                    self.click(337, 24)
+                    self.click(361, 28)
                     popup.assert_called_once()
                 if expanded:
                     self.assertIn(LONG_TITLE, app.follow_hint())
@@ -232,7 +232,7 @@ class PanelGuiTests(unittest.TestCase):
                 self.root.geometry(f"+{x}+{y}")
                 self.root.update()
                 for _ in range(3):
-                    self.click(778, 24)
+                    self.click(846, 28)
                     self.assertTrue(app.expanded)
                     self.assertGreaterEqual(self.root.winfo_y(), top)
                     self.assertLessEqual(self.root.winfo_y() + self.root.winfo_height(), bottom,
@@ -246,14 +246,26 @@ class PanelGuiTests(unittest.TestCase):
 
 def preview():
     root, app = make_panel("preview")
-    root.overrideredirect(False)
     kind = "紧凑" if "--compact" in sys.argv else "错误" if "--error" in sys.argv else "明细"
     root.title("Codex 面板 · 隔离界面验证（" + kind + "）")
+    # Expose only this standalone preview in the taskbar without adding a title
+    # frame or changing the production window's borderless material/geometry.
+    if app.material.hwnd:
+        import ctypes
+        from ctypes import wintypes
+        user = ctypes.WinDLL("user32")
+        user.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+        user.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+        user.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+        user.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+        style = user.GetWindowLongPtrW(app.material.hwnd, -20)
+        user.SetWindowLongPtrW(app.material.hwnd, -20, (style | 0x40000) & ~0x80)
     app.set_expanded("--compact" not in sys.argv)
     scenario(app, "读取失败" if "--error" in sys.argv else "空闲")
     controls = tk.Toplevel(root)
     controls.title("面板验证控制")
     controls.geometry("720x70+40+600")
+    controls.protocol("WM_DELETE_WINDOW", app.close)
     for name in ("等待会话", "读取中", "等待统计", "生成中", "空闲", "读取失败", "大数值"):
         tk.Button(controls, text=name, command=lambda n=name: scenario(app, n)).pack(side="left", padx=4, pady=10)
     def refresh():

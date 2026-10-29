@@ -109,6 +109,16 @@ def foreground_pid():
     return process.value or None
 
 
+def main_window_pid():
+    if os.name != "nt":
+        return None
+    # Reuse the watcher's visible main-window check. Import lazily because the
+    # watcher also uses desktop_pid_is_alive from this module.
+    from codex_autostart import codex_window
+    window = codex_window()
+    return window[0] if window else None
+
+
 def numeric_directories(parent):
     try:
         return [p for p in parent.iterdir() if p.name.isdigit() and p.is_dir()
@@ -206,10 +216,11 @@ class SessionResolver:
 
 class DesktopSessionFollower:
     def __init__(self, log_root, sessions_root, window_id=1, alive=desktop_pid_is_alive,
-                 foreground=foreground_pid, resolver=None):
+                 foreground=foreground_pid, resolver=None, main_window=main_window_pid):
         self.log_root = Path(log_root)
         self.window_id = window_id
         self.alive, self.foreground = alive, foreground
+        self.main_window = main_window
         self.resolver = resolver or SessionResolver(sessions_root)
         self.pid = None
         self.files = {}
@@ -233,7 +244,11 @@ class DesktopSessionFollower:
             return
         focused = self.foreground()
         pids = {entry[1] for entry in candidates}
-        chosen = focused if focused in pids else self.pid if self.pid in pids else max(candidates, key=lambda x: x[2])[1]
+        visible = self.main_window() if focused not in pids else None
+        # Utility processes share the executable and log naming scheme, but do
+        # not own navigation. Restarting under another app must select the UI.
+        chosen = (focused if focused in pids else visible if visible in pids else
+                  self.pid if self.pid in pids else max(candidates, key=lambda x: x[2])[1])
         if chosen != self.pid:
             self.files = {}
         self.pid = chosen

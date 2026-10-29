@@ -64,7 +64,7 @@ class WindowInteractionTests(unittest.TestCase):
         for expanded in (False, True):
             self.app.set_expanded(expanded)
             for dx, dy in ((-10000, -10000), (10000, -10000), (10000, 10000), (-10000, 10000)):
-                self.gesture(249, 24, dx, dy)
+                self.gesture(260, 28, dx, dy)
                 self.assert_visible()
 
     def test_all_borders_and_corners_resize_with_matching_cursor(self):
@@ -72,10 +72,10 @@ class WindowInteractionTests(unittest.TestCase):
             self.app.set_expanded(expanded)
             height = self.app.EXPANDED_HEIGHT if expanded else self.app.BAR_HEIGHT
             for edge, x, y, dx, dy in (
-                ("e", 838, height / 2, 120, 0), ("w", 2, height / 2, -120, 0),
-                ("n", 420, 2, 0, -12), ("s", 420, height - 2, 0, 12),
-                ("nw", 6, 6, -120, -24), ("ne", 834, 6, 120, -24),
-                ("sw", 6, height - 6, -120, 24), ("se", 834, height - 6, 120, 24)):
+                ("e", self.app.WIDTH - 2, height / 2, 120, 0), ("w", 2, height / 2, -120, 0),
+                ("n", self.app.WIDTH / 2, 2, 0, -12), ("s", self.app.WIDTH / 2, height - 2, 0, 12),
+                ("nw", 6, 6, -120, -24), ("ne", self.app.WIDTH - 6, 6, 120, -24),
+                ("sw", 6, height - 6, -120, 24), ("se", self.app.WIDTH - 6, height - 6, 120, 24)):
                 self.app.reset_size()
                 self.app.place_window(250, 180)
                 self.root.update()
@@ -93,10 +93,10 @@ class WindowInteractionTests(unittest.TestCase):
         for expanded in (False, True):
             self.app.set_expanded(expanded)
             height = self.app.EXPANDED_HEIGHT if expanded else self.app.BAR_HEIGHT
-            self.gesture(838, height / 2, -10000, 0)
+            self.gesture(self.app.WIDTH - 2, height / 2, -10000, 0)
             self.assertAlmostEqual(self.app.zoom, self.app.MIN_ZOOM)
             self.assert_visible()
-            self.gesture(838, height / 2, 10000, 0)
+            self.gesture(self.app.WIDTH - 2, height / 2, 10000, 0)
             self.assertLessEqual(self.app.zoom, self.app.MAX_ZOOM)
             self.assert_visible()
             self.assertLessEqual(self.app.canvas.bbox("close")[2], self.root.winfo_width())
@@ -107,7 +107,7 @@ class WindowInteractionTests(unittest.TestCase):
         self.root.update()
         original = self.bounds()[:2]
         self.app.set_expanded(True)
-        self.gesture(838, 182, 230, 0)
+        self.gesture(self.app.WIDTH - 2, 182, 230, 0)
         expected = panel.clamp_position(*original, self.app.px(self.app.WIDTH), self.app.px(self.app.BAR_HEIGHT),
                                         (left, top, right, bottom))
         for _ in range(5):
@@ -120,7 +120,7 @@ class WindowInteractionTests(unittest.TestCase):
             self.root.update()
 
     def test_zoom_and_position_are_restored_and_default_size_is_available(self):
-        self.gesture(838, 24, 180, 0)
+        self.gesture(self.app.WIDTH - 2, 28, 180, 0)
         before, zoom = self.bounds(), self.app.zoom
         self.reopen()
         self.assertEqual(self.bounds(), before)
@@ -154,7 +154,7 @@ class WindowInteractionTests(unittest.TestCase):
                 self.assert_visible(area)
                 self.app.set_expanded(True)
                 self.assert_visible(area)
-                self.gesture(249, 24, -20000, 20000)
+                self.gesture(260, 28, -20000, 20000)
                 self.assert_visible(area)
                 self.app.set_expanded(False)
                 self.assert_visible(area)

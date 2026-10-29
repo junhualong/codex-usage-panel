@@ -8,7 +8,7 @@ Windows 桌面上的 Codex 本地用量面板：自动跟随主窗口当前聊�
 
 使用 **Windows 10 / 11 x64** 和本机 Codex 桌面应用。便携包内置运行环境，无需安装 Python、PowerShell 7 或其他依赖，也无需管理员权限。
 
-1. 获取 `CodexUsagePanel-v1.0.3-windows-x64.zip`，把整个 `CodexUsagePanel` 文件夹解压到固定位置。
+1. 获取 `CodexUsagePanel-v1.0.4-windows-x64.zip`，把整个 `CodexUsagePanel` 文件夹解压到固定位置。
 2. 双击 `CodexUsagePanel.exe`。入口会启动后台监听；Codex 已打开时显示面板，否则等待 Codex 打开。
 3. 如需重启电脑后自动使用，勾选“登录 Windows 后自动待命，随 Codex 打开和关闭面板”。
 4. 可点击“创建桌面快捷方式”。关闭启动设置窗口后，后台监听继续运行。
@@ -18,6 +18,15 @@ Windows 桌面上的 Codex 本地用量面板：自动跟随主窗口当前聊�
 项目：[junhualong/codex-usage-panel](https://github.com/junhualong/codex-usage-panel)。从 [Releases](https://github.com/junhualong/codex-usage-panel/releases) 下载便携 ZIP，旧版本也保留在该页面；源码的“Download ZIP”不能代替便携包。仓库也提供手动运行的 GitHub Actions 构建流程，产物在该次运行的 Artifacts 中。
 
 当前构建未做数字签名。支持目标为 Windows 10/11 x64；本地已验证 Windows 11，尚未完成其他电脑或干净虚拟机上的验收。
+
+## v1.0.4 更新
+
+- B 版界面：蓝灰毛玻璃配合矢量机器人，空闲眨眼、生成中轻微点头、读取失败时琥珀色静止；悬停查看实际状态，动画不表示实时生成速度。
+- 缩小时保留清晰字号；100% DPI 下最小横条约 730×45，标签至少 12、核心数字至少 16 逻辑像素，极大数值在横条使用科学计数法，明细和复制仍保留精确值。
+- 适配系统透明效果、高对比度及动画偏好；毛玻璃不可用时回退到实色背景。
+- 后台读取失败会记录原因并重试，读取线程意外退出后自动恢复；界面刷新异常不会永久停止后续更新。
+- 修复其他应用在前台时启动面板可能误选 Codex 同名辅助进程、停留在等待会话的问题。
+- 保留统计口径、自动跟随、拖动缩放、工作区边界限制、底部向上展开和收起位置恢复；旧版本继续保留在 Releases。
 
 ## v1.0.3 更新
 
@@ -66,6 +75,8 @@ Windows 桌面上的 Codex 本地用量面板：自动跟随主窗口当前聊�
 
 ## 面板和统计口径
 
+- B 版界面使用蓝灰毛玻璃与矢量机器人：空闲偶尔眨眼，生成中轻微点头，读取失败时静止并显示琥珀色；等待与读取状态使用不同静态表情。悬停机器人查看准确状态和原因，动画不表示实时生成速度。
+- 毛玻璃由 Windows 原生合成，文字保持独立绘制，不降低整个窗口的透明度。系统关闭透明效果、启用高对比度或材质接口不可用时回退到蓝灰实色；关闭系统动画时机器人显示静态帧，运行中会自动更新这些偏好。
 - 点击“会话累计 / 最近调用”文字或下拉箭头打开范围菜单，当前选项有标记；选择后保存偏好，并同步用量、缓存命中率、明细、悬浮说明和复制内容。最近调用指一次模型调用。
 - 明细按输入与输出分列：输入总量下的“已缓存 / 未缓存”是输入子项，输出总量下的“其中推理”是输出子项；底部独立显示总用量 = 输入 + 输出。区域单位为 tokens，精确数值使用千位分隔。
 - 缓存命中率 = 缓存命中输入 / 输入。没有有效计数时显示“—”。
@@ -74,10 +85,12 @@ Windows 桌面上的 Codex 本地用量面板：自动跟随主窗口当前聊�
 - “跟随中”是状态标识，悬停查看跟随方式及完整聊天名称；固定模式显示“固定会话”。这个标识不展开面板。
 - 点“明细”展开，再点“收起”或按 Esc 返回原来的紧凑位置；靠近底部时向上展开。拖动空白处移动，置顶开启时按钮有选中底色，右键可打开启动设置。
 - 面板移动和缩放时限制在所在显示器的可用工作区内，避开任务栏；启动或屏幕布局变化后会自动找回越界窗口。多屏拖动时以鼠标所在屏幕为目标。
-- 拖动边缘或四角可按比例放大、缩小，文字和按钮一起缩放；右下角有缩放标记。大小随位置一起记住，右键“恢复默认大小”可重置。常规缩放范围为系统 DPI 基准的 80%～200%，上限受屏幕工作区限制，小屏时会自动适配；展开和收起使用相同缩放比例。
+- 拖动边缘或四角可按比例放大、缩小；右下角有缩放标记。100% DPI 下默认横条 912×56，最小约 730×45；标签最低 12 逻辑像素，核心数字最低 16 逻辑像素，优先缩小间距而不是字。大小随位置一起记住，右键“恢复默认大小”可重置。常规缩放范围为系统 DPI 基准的 80%～200%，上限受屏幕工作区限制；工作区小到无法容纳最小尺寸时，整体适配以保留所有控件。展开和收起使用相同缩放比例。
 - 展开区保留最近调用摘要；“统计口径 ⓘ”悬浮说明集中解释公式、计数范围和刷新机制。“数据时间”是用量统计记录时间，悬停可看完整日期时间及本地时区；相对时间随界面刷新，空闲期间保留上次有效记录。
 - “复制统计”与右键“复制当前统计”复制所选范围的精确用量、缓存命中率、速度口径和数据时间；按钮会短暂显示“已复制”。
 - 尚未识别本地聊天显示“等待会话”，读取历史或导航记录时显示“读取中”，尚无用量记录时显示“等待统计”。生成状态依据任务事件；正常空闲显示“等待新的调用”。实际读取错误显示“读取失败”，明细提供原因，悬停可查看完整说明。长时间没有新统计不会被判为连接异常。
+- 后台读取异常会记录原因并自动重试；会话跟随或用量读取线程意外退出时自动恢复，避免长期停留在旧聊天。界面刷新发生异常后仍会继续尝试更新；正常空闲不会触发重启。
+- 当其他应用处于前台时启动面板，优先通过已识别的 Codex 主窗口选择导航日志，避免误选同名辅助进程后一直等待会话。
 - 关闭 Codex 主窗口后面板通常在约 1～2 秒内退出；后台监听继续等待重开。最小化 Codex 不关闭面板。
 - 手动关闭面板后，本次 Codex 打开期间不会反复弹出；可用入口的“启动 / 显示面板”重新显示。
 
@@ -128,7 +141,7 @@ python -m venv .local\build-venv
 构建产物：
 
 - `dist/CodexUsagePanel/`：可直接运行的完整文件夹。
-- `dist/CodexUsagePanel-v1.0.3-windows-x64.zip`：给其他人的便携包。
+- `dist/CodexUsagePanel-v1.0.4-windows-x64.zip`：给其他人的便携包。
 - `dist/SHA256SUMS.txt`：ZIP 的 SHA-256 校验值。
 
 构建只收集程序、运行时和允许分发的说明文件，并检查个人配置、会话日志是否误入包。中间文件放在 `.local/build`；`.local`、`dist`、本机配置和快捷方式都被 Git 忽略。第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，本项目自身的开源许可证尚未选择。
@@ -140,7 +153,9 @@ python -m venv .local\build-venv
 ```powershell
 python -B -X utf8 tests\gui_lifecycle_test.py
 python -B -X utf8 tests\gui_follow_test.py
+python -B -X utf8 tests\gui_reader_recovery_test.py
 python -B -X utf8 tests\gui_panel_test.py
+python -B -X utf8 tests\gui_visuals_test.py
 python -B -X utf8 tests\gui_window_test.py
 python -B -X utf8 tests\test_panel_geometry.py
 python -B -X utf8 tests\test_restart_survival.py
@@ -156,6 +171,8 @@ python -B -X utf8 tests\test_portable.py
 
 `gui_window_test.py` 用隔离的 Tk 窗口验证四边约束、八个缩放方向、最小/最大尺寸、缩放记忆、展开收起锚点和屏幕变化后的恢复；负坐标屏幕、任务栏预留和小屏高 DPI 使用模拟工作区，不代替实际多显示器验收。
 
-无法启动时查看数据目录内的 `launcher-error.log`；旧入口可能使用 `autostart-error.log`，面板回调错误使用 `panel-error.log`。自定义 Codex 数据目录且未继承环境变量时，在配置中显式填写 `codex_home`。
+`gui_reader_recovery_test.py` 使用独立日志和 Tk 窗口注入读取异常、后台线程退出及刷新异常，验证自动恢复、恢复后的聊天切换和增量统计，以及空闲/远程页面不误重启。
+
+无法启动时查看数据目录内的 `launcher-error.log`；旧入口可能使用 `autostart-error.log`。面板读取、刷新和回调错误记录在 `panel-error.log`，包含异常及恢复信息；相同读取错误最多每分钟记录一次。`status.json` 中的 `follow_reader_alive`、`usage_reader_alive` 可辅助确认后台线程状态；等待非本地聊天时用量读取线程停止属于正常行为。自定义 Codex 数据目录且未继承环境变量时，在配置中显式填写 `codex_home`。
 
 后台进程通过 [Windows WMI](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/create-method-in-class-win32-process) 独立启动，避免被调用方的 Job 一同终止；登录启动项通过 [WMI 注册表提供程序](https://learn.microsoft.com/en-us/windows/win32/wmisdk/wmi-tasks--registry) 操作本用户的 Windows 注册表；打包目录依据 [PyInstaller 运行时路径规则](https://pyinstaller.org/en/stable/runtime-information.html) 区分程序与用户数据。

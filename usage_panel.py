@@ -21,16 +21,17 @@ from active_session import DesktopSessionFollower, Selection
 from codex_autostart import PANEL_MUTEX_NAME, PanelCloseSignal
 from generation_speed import SpeedSample, SpeedTracker, speed_label
 from app_runtime import app_command, load_config
+from panel_visuals import WindowMaterial, robot_pose, visual_preferences
 
 
 APP_TITLE = "Codex 实时用量"
-BACKGROUND = "#1c1e24"
-SURFACE = "#24272f"
-BORDER = "#383c47"
-TEXT = "#e5e9f1"
-MUTED = "#b1bac8"
-HOVER = "#343a46"
-SELECTED = "#293e50"
+BACKGROUND = "#17222e"
+SURFACE = "#202f3e"
+BORDER = "#405363"
+TEXT = "#eef4fa"
+MUTED = "#c1ceda"
+HOVER = "#334c60"
+SELECTED = "#29475e"
 ACCENT = "#9ed5ff"
 GREEN = "#8ed6b2"
 AMBER = "#e9bf80"
@@ -382,9 +383,9 @@ def singleton():
 
 
 class UsagePanel:
-    WIDTH = 840
-    BAR_HEIGHT = 48
-    EXPANDED_HEIGHT = 364
+    WIDTH = 912
+    BAR_HEIGHT = 56
+    EXPANDED_HEIGHT = 372
     MIN_ZOOM = 0.8
     MAX_ZOOM = 2.0
     RESIZE_CURSORS = {"n": "size_ns", "s": "size_ns", "e": "size_we", "w": "size_we",
@@ -414,6 +415,9 @@ class UsagePanel:
         self.follow_queue = queue.Queue(maxsize=2)
         self.follow_stop = threading.Event()
         self.follow_selection = Selection()
+        self.worker = self.follow_worker = None
+        self.reader_errors = {}
+        self.reader_log_lock = threading.Lock()
         self.last_status = None
         self.generation = 0
         self.closed = False
@@ -429,6 +433,15 @@ class UsagePanel:
         self.scope_variable = tk.StringVar(root, value=self.mode)
         self.fonts = {}
         self.poll_job = None
+        self.animation_job = None
+        self.animation_start = time.monotonic()
+        self.animation_enabled = True
+        self.robot_parts = []
+        self.robot_frame = None
+        self.material = None
+        self.preferences = None
+        self.preference_check = 0
+        self.background = BACKGROUND
         self.drag_origin = None
         self.resize_origin = None
         try:
@@ -463,6 +476,9 @@ class UsagePanel:
         self.canvas.bind("<Button-3>", self.context_menu)
         self.render()
         root.deiconify()
+        root.update_idletasks()
+        self.material = WindowMaterial(root)
+        self.refresh_visual_settings()
         if self.follow_enabled:
             self.snapshot = Snapshot(loading=False, message=self.follow_selection.message)
             self.start_follow_reader()
@@ -470,6 +486,7 @@ class UsagePanel:
             self.start_reader()
         self.render()
         self.poll_job = root.after(100, self.tick)
+        self.animation_job = root.after(100, self.animate_robot)
 
     def px(self, value):
         return int(round(value * self.scale))
@@ -499,6 +516,11 @@ class UsagePanel:
         current = (self.root.winfo_x(), self.root.winfo_y(), self.root.winfo_width(), self.root.winfo_height())
         if target != current:
             self.root.geometry(f"{width}x{height}+{x}+{y}")
+        if self.material:
+            # Apply Tk's queued move before SetWindowRgn sends WM_WINDOWPOSCHANGED;
+            # otherwise Windows can restore the pre-expansion bottom-edge position.
+            self.root.update_idletasks()
+            self.material.resize(width, height, max(4, self.px(10)))
         self.last_work_area = area
         anchor = self.compact_position if self.expanded else (x, y)
         self.compact_position = clamp_position(*anchor, width, self.px(self.BAR_HEIGHT), area)
@@ -549,8 +571,12 @@ class UsagePanel:
     def font(self, size=12, bold=False, mono=False):
         key = (size, bold, mono)
         if key not in self.fonts:
+            # Keep type legible at minimum zoom; only an undersized work area can
+            # lower the DPI floor so the complete panel still remains reachable.
+            floor_dpi = min(self.dpi_scale, self.scale / self.MIN_ZOOM)
+            pixels = max(self.px(size), round((16 if size >= 15 else 12) * floor_dpi))
             self.fonts[key] = tkfont.Font(family="Consolas" if mono else "Microsoft YaHei UI",
-                                          size=-self.px(size), weight="bold" if bold else "normal")
+                                          size=-pixels, weight="bold" if bold else "normal")
         return self.fonts[key]
 
     def text(self, x, y, value, color=TEXT, size=12, anchor="w", bold=False, mono=False, tags=()):
@@ -603,6 +629,7 @@ class UsagePanel:
         return (f"统计范围：{self.scope_label}（同时影响用量和缓存命中率）\n"
                 f"输入 {exact(usage.input_tokens)} + 输出 {exact(usage.output_tokens)} = {exact(usage.total_tokens)} tokens\n"
                 "K = 1,000，M = 1,000,000，B = 1,000,000,000\n"
+                "横条极大数值使用科学计数法（e+ 表示 10 的幂），精确数值见明细或复制统计\n"
                 "会话累计用量不代表当前上下文占用；缓存已包含在输入中\n"
                 f"{state}：{reason}\n— 表示该范围的统计字段缺失，不能视为 0")
 
@@ -654,16 +681,22 @@ class UsagePanel:
         if pressed == tag and not self.drag_origin and not self.resize_origin:
             callback()
 
-    def hitbox(self, x1, x2, tag, y1=6, y2=42, selected=False):
-        fill = SELECTED if selected else BACKGROUND
+    def hitbox(self, x1, x2, tag, y1=8, y2=48, selected=False):
+        fill = SELECTED if selected else self.background
         self.button_fills[tag] = fill
         self.rounded(x1, y1, x2, y2, 6, fill, tags=("button", tag, tag + "_bg"))
 
     def number(self, right, y, value, width, color=TEXT, size=13, bold=False, tags=()):
         # Keep exact, right-aligned digits even for large cumulative counts and DPI scaling.
-        while size > 8 and self.font(size, bold, True).measure(value) > self.px(width):
+        minimum = 15 if size >= 15 else 12
+        while size > minimum and self.font(size, bold, True).measure(value) > self.px(width):
             size -= 1
         return self.text(right, y, value, color, size, anchor="e", bold=bold, mono=True, tags=tags)
+
+    def metric_label(self, label, raw, width, prefix=""):
+        if raw is not None and self.font(15, True, True).measure(label) > self.px(width):
+            return prefix + f"{raw:.0e}"
+        return label
 
     def render(self):
         self.hide_tooltip()
@@ -672,65 +705,133 @@ class UsagePanel:
         c = self.canvas
         c.delete("all")
         height = self.EXPANDED_HEIGHT if self.expanded else self.BAR_HEIGHT
-        self.rounded(1, 1, self.WIDTH-1, height-1, 12, BACKGROUND, BORDER)
+        self.rounded(1, 1, self.WIDTH-1, height-1, 12, self.background, BORDER)
+        self.line(14, 2, self.WIDTH-14, 2, "#526575")
         usage, rate = self.current_usage, self.current_usage.cache_rate
         state, reason, state_color = self.state()
-        brand = "CODEX" if state == "等待新的调用" else state
-        c.create_oval(self.px(15), self.px(21), self.px(21), self.px(27), fill=state_color, outline="", tags=("state",))
-        self.text(30, 24, brand, state_color, 11, bold=True, tags=("state",))
-        self.hint("state", f"{state}：{reason}")
-        self.line(94, 15, 94, 33)
+        self.draw_robot()
+        self.hint("state", f"{state}：{reason}\n机器人动效只表示任务状态，不表示实时生成速度")
+        self.line(62, 17, 62, 39)
         self.draw_speed()
-        self.hitbox(253, 350, "scope")
-        self.text(264, 24, self.scope_label, TEXT, 11, tags=("button", "scope"))
-        self.line(333, 22, 337, 26, MUTED, tags=("button", "scope"))
-        self.line(337, 26, 341, 22, MUTED, tags=("button", "scope"))
+        self.hitbox(264, 375, "scope")
+        self.text(276, 28, self.scope_label, TEXT, 12, tags=("button", "scope"))
+        self.line(357, 26, 361, 30, MUTED, tags=("button", "scope"))
+        self.line(361, 30, 365, 26, MUTED, tags=("button", "scope"))
         self.action("scope", self.open_scope_menu, "选择会话累计或最近调用：影响用量及缓存命中率，均速保持本轮最近已结算调用口径")
-        self.number(454, 24, compact(usage.total_tokens), 96, ACCENT, 18, True, ("tokens", "compact_total"))
-        self.text(464, 25, "tok", MUTED, 11, tags=("tokens",))
+        total_label = self.metric_label(compact(usage.total_tokens), usage.total_tokens, 104)
+        self.number(488, 28, total_label, 104, ACCENT, 20, True, ("tokens", "compact_total"))
+        self.text(500, 29, "tok", MUTED, 12, tags=("tokens",))
         self.hint("tokens", self.usage_hint)
-        self.line(496, 15, 496, 33)
-        self.text(510, 23, "缓存命中", MUTED, 11, tags=("cache",))
-        self.text(628, 23, "—" if rate is None else f"{rate:.1f}%", GREEN, 15, anchor="e", bold=True, mono=True, tags=("cache", "cache_rate"))
-        self.line(510, 35, 628, 35, BORDER, 2, ("cache",))
+        self.line(536, 17, 536, 39)
+        self.text(550, 27, "缓存命中", MUTED, 12, tags=("cache",))
+        self.text(680, 27, "—" if rate is None else f"{rate:.1f}%", GREEN, 18, anchor="e", bold=True, mono=True, tags=("cache", "cache_rate"))
+        self.line(550, 41, 680, 41, BORDER, 2, ("cache",))
         if rate is not None and rate > 0:
-            self.line(510, 35, 510 + 118 * rate / 100, 35, GREEN, 2, ("cache",))
+            self.line(550, 41, 550 + 130 * rate / 100, 41, GREEN, 2, ("cache",))
         self.hint("cache", self.cache_hint)
-        self.line(642, 15, 642, 33)
+        self.line(694, 17, 694, 39)
         following = bool(self.follow_selection.path)
         badge = ("跟随中" if following else state) if self.follow_enabled else "固定会话"
-        self.rounded(650, 9, 714, 39, 6, SURFACE, tags=("follow",))
-        self.text(682, 24, badge, ACCENT if following or not self.follow_enabled else MUTED,
-                  11, anchor="center", tags=("follow",))
+        self.rounded(704, 11, 782, 45, 6, SURFACE, tags=("follow",))
+        self.text(743, 28, badge, ACCENT if following or not self.follow_enabled else MUTED,
+                  12, anchor="center", tags=("follow",))
         self.hint("follow", self.follow_hint)
-        self.hitbox(722, 752, "pin", selected=self.topmost)
+        self.hitbox(790, 820, "pin", selected=self.topmost)
         pin_color = ACCENT if self.topmost else MUTED
-        self.line(732, 17, 742, 17, pin_color, 1, ("button", "pin"))
-        self.line(734, 17, 734, 23, pin_color, 1, ("button", "pin"))
-        self.line(740, 17, 740, 23, pin_color, 1, ("button", "pin"))
-        self.line(732, 24, 742, 24, pin_color, 1, ("button", "pin"))
-        self.line(737, 24, 737, 31, pin_color, 1, ("button", "pin"))
+        self.line(800, 21, 810, 21, pin_color, 1, ("button", "pin"))
+        self.line(802, 21, 802, 27, pin_color, 1, ("button", "pin"))
+        self.line(808, 21, 808, 27, pin_color, 1, ("button", "pin"))
+        self.line(800, 28, 810, 28, pin_color, 1, ("button", "pin"))
+        self.line(805, 28, 805, 35, pin_color, 1, ("button", "pin"))
         self.action("pin", self.toggle_topmost, "置顶已开启，点击取消" if self.topmost else "点击保持面板置顶")
-        self.hitbox(758, 798, "details")
-        self.text(778, 24, "收起" if self.expanded else "明细", TEXT, 11, anchor="center", tags=("button", "details"))
+        self.hitbox(826, 866, "details")
+        self.text(846, 28, "收起" if self.expanded else "明细", TEXT, 12, anchor="center", tags=("button", "details"))
         self.action("details", lambda: self.set_expanded(not self.expanded), "展开或收起精确用量；Esc 可收起")
-        self.hitbox(804, 834, "close")
-        self.line(815, 20, 823, 28, MUTED, tags=("button", "close"))
-        self.line(823, 20, 815, 28, MUTED, tags=("button", "close"))
+        self.hitbox(872, 904, "close")
+        self.line(884, 24, 892, 32, MUTED, tags=("button", "close"))
+        self.line(892, 24, 884, 32, MUTED, tags=("button", "close"))
         self.action("close", self.close, "关闭统计面板")
         if self.expanded:
+            first = c.find_all()[-1]
             self.draw_details(usage)
+            for item in c.find_all():
+                if item > first:
+                    c.move(item, 0, self.px(8))
         self.line(self.WIDTH - 13, height - 4, self.WIDTH - 4, height - 13, MUTED, tags=("resize_grip",))
         self.line(self.WIDTH - 8, height - 4, self.WIDTH - 4, height - 8, MUTED, tags=("resize_grip",))
         if self.resize_origin:
             self.canvas.configure(cursor=self.RESIZE_CURSORS[self.resize_origin[0]])
 
     def draw_speed(self):
-        self.text(105, 24, "均速", MUTED, 11, tags=("speed",))
-        self.number(194, 24, speed_label(self.snapshot.speed), 60, ACCENT, 16, True, ("speed", "speed_value"))
-        self.text(204, 25, "tok/s", MUTED, 10, tags=("speed",))
-        self.line(244, 15, 244, 33)
+        self.text(76, 28, "均速", MUTED, 12, tags=("speed",))
+        speed = self.snapshot.speed
+        speed_text = self.metric_label(speed_label(speed), speed.tokens_per_second, 78, "≈")
+        self.number(190, 28, speed_text, 78, ACCENT, 18, True, ("speed", "speed_value"))
+        self.text(200, 29, "tok/s", MUTED, 12, tags=("speed",))
+        self.line(256, 17, 256, 39)
         self.hint("speed", self.speed_hint)
+
+    def draw_robot(self):
+        c = self.canvas
+        self.rounded(8, 7, 54, 49, 7, self.background, tags=("state",))
+        self.line(30, 13, 30, 19, ACCENT, 1, ("state", "robot", "robot_ink"))
+        c.create_oval(self.px(28), self.px(10), self.px(32), self.px(14), fill=ACCENT,
+                      outline="", tags=("state", "robot", "robot_ink"))
+        for left, right in ((12, 16), (44, 48)):
+            self.rounded(left, 25, right, 33, 2, SURFACE, ACCENT, ("state", "robot", "robot_shell"))
+        self.rounded(16, 18, 44, 40, 6, SURFACE, ACCENT, ("state", "robot", "robot_shell"))
+        self.line(26, 35, 34, 35, ACCENT, 1, ("state", "robot", "robot_ink"))
+        self.robot_eyes = [c.create_oval(0, 0, 1, 1, fill=ACCENT, outline="", tags=("state", "robot", "robot_ink")) for _ in range(2)]
+        self.robot_parts = [(item, c.coords(item)) for item in c.find_withtag("robot") if item not in self.robot_eyes]
+        self.robot_frame = None
+        self.update_robot()
+
+    def update_robot(self):
+        frame = robot_pose(self.state()[0], time.monotonic() - self.animation_start, self.animation_enabled)
+        if frame == self.robot_frame:
+            return
+        offset, eye, color = frame
+        for item, coords in self.robot_parts:
+            self.canvas.coords(item, *[value + (self.px(offset) if index % 2 else 0)
+                                       for index, value in enumerate(coords)])
+        for item, x in zip(self.robot_eyes, (23, 37)):
+            self.canvas.coords(item, self.px(x - 1.7), self.px(28 + offset - eye),
+                               self.px(x + 1.7), self.px(28 + offset + eye))
+        self.canvas.itemconfigure("robot_ink", fill=color)
+        self.canvas.itemconfigure("robot_shell", outline=color)
+        self.robot_frame = frame
+
+    def animate_robot(self):
+        self.animation_job = None
+        if self.closed:
+            return
+        try:
+            self.update_robot()
+        except Exception as exc:
+            self.report_reader_error("机器人绘制", exc)
+        finally:
+            if not self.closed:
+                self.animation_job = self.root.after(65 if self.state()[0] == "生成中" else 100, self.animate_robot)
+
+    def refresh_visual_settings(self):
+        now = time.monotonic()
+        if now < self.preference_check or not self.material:
+            return
+        self.preference_check = now + 5
+        preferences = visual_preferences()
+        if preferences == self.preferences:
+            return
+        self.preferences = preferences
+        self.animation_enabled = preferences[1]
+        self.material.apply(preferences[0])
+        self.background = "#000000" if self.material.enabled else BACKGROUND
+        canvas_background = "#000000" if self.material.enabled else TRANSPARENT
+        if os.name == "nt" and not self.material.enabled:
+            self.root.attributes("-transparentcolor", TRANSPARENT)
+        self.root.configure(bg=canvas_background)
+        self.canvas.configure(bg=canvas_background)
+        self.material.resize(self.px(self.WIDTH), self.px(self.EXPANDED_HEIGHT if self.expanded else self.BAR_HEIGHT), self.px(10))
+        self.render()
 
     def draw_details(self, usage):
         right, middle = self.WIDTH - 22, self.WIDTH // 2
@@ -782,6 +883,7 @@ class UsagePanel:
 
     def refresh_transient(self):
         # Update only these items: idle clocks must not redraw hovered controls.
+        self.refresh_visual_settings()
         if self.expanded:
             self.canvas.itemconfigure("data_time", text=self.data_time_text())
         if self.copy_until and time.monotonic() >= self.copy_until:
@@ -827,6 +929,52 @@ class UsagePanel:
             self.tooltip = None
         self.canvas.configure(cursor="")
 
+    def report_reader_error(self, name, error):
+        # pythonw has no stderr: record background failures explicitly, with a rate limit.
+        signature = (type(error).__name__, str(error))
+        now = time.monotonic()
+        with self.reader_log_lock:
+            previous = self.reader_errors.get(name)
+            if previous and previous[0] == signature and now - previous[1] < 60:
+                return
+            self.reader_errors[name] = (signature, now)
+            try:
+                with (self.state_dir / "panel-error.log").open("a", encoding="utf-8") as stream:
+                    stream.write(f"\n{datetime.now().astimezone().isoformat(timespec='seconds')} [{name}] 失败，自动重试\n")
+                    traceback.print_exception(type(error), error, error.__traceback__, file=stream)
+            except OSError:
+                pass
+
+    def report_reader_recovered(self, name):
+        with self.reader_log_lock:
+            if self.reader_errors.pop(name, None) is None:
+                return
+            try:
+                with (self.state_dir / "panel-error.log").open("a", encoding="utf-8") as stream:
+                    stream.write(f"{datetime.now().astimezone().isoformat(timespec='seconds')} [{name}] 已恢复\n")
+            except OSError:
+                pass
+
+    def ensure_readers(self):
+        # A stopped worker is evidence of failure; old usage timestamps are not.
+        if (self.follow_enabled and not self.follow_stop.is_set()
+                and self.follow_worker is not None and not self.follow_worker.is_alive()):
+            reason = "自动跟随线程意外停止，正在恢复"
+            self.report_reader_error("自动跟随", RuntimeError(reason))
+            while not self.follow_queue.empty():
+                self.follow_queue.get_nowait()
+            self.apply_follow_selection(Selection(error=reason))
+            self.start_follow_reader()
+            return True
+        if (not self.stop.is_set() and self.worker is not None and not self.worker.is_alive()
+                and (not self.follow_enabled or self.follow_selection.path)):
+            reason = "用量读取线程意外停止，正在恢复"
+            self.report_reader_error("用量读取", RuntimeError(reason))
+            self.start_reader()
+            self.snapshot.loading, self.snapshot.error = False, reason
+            return True
+        return False
+
     def start_reader(self):
         self.stop.set()
         self.stop = threading.Event()
@@ -837,10 +985,21 @@ class UsagePanel:
         interval = max(0.25, float(self.config.get("refresh_ms", 1000)) / 1000)
 
         def worker():
-            tailer = LogTailer(path)
+            tailer = None
             while not stop.is_set():
-                current = tailer.poll()
-                copy = Snapshot(**vars(current))
+                try:
+                    if tailer is None:
+                        tailer = LogTailer(path)
+                    copy = Snapshot(**vars(tailer.poll()))
+                    if copy.error:
+                        self.report_reader_error("用量读取", RuntimeError(copy.error))
+                    else:
+                        self.report_reader_recovered("用量读取")
+                except Exception as exc:
+                    self.report_reader_error("用量读取", exc)
+                    # A failed batch may have advanced its offset; replay from the start.
+                    tailer = None
+                    copy = Snapshot(loading=False, error=f"用量读取异常，正在重试：{type(exc).__name__}: {exc}")
                 # Navigation already identifies the chat even if its log cannot be read yet.
                 copy.session_id = copy.session_id or session_id
                 try:
@@ -854,20 +1013,28 @@ class UsagePanel:
                         self.queue.put_nowait((generation, copy))
                     except queue.Full:
                         pass
-                stop.wait(0.01 if current.loading else interval)
+                stop.wait(max(1.0, interval) if copy.error else 0.01 if copy.loading else interval)
 
         self.worker = threading.Thread(target=worker, daemon=True, name="CodexLogReader")
         self.worker.start()
 
     def start_follow_reader(self):
         def worker():
-            follower = DesktopSessionFollower(self.config["desktop_logs_root"], self.sessions_root,
-                                              window_id=int(self.config.get("follow_window_id", 1)))
+            follower = None
             while not self.follow_stop.is_set():
                 try:
+                    if follower is None:
+                        follower = DesktopSessionFollower(self.config["desktop_logs_root"], self.sessions_root,
+                                                          window_id=int(self.config.get("follow_window_id", 1)))
                     selection = follower.poll()
-                except (OSError, ValueError) as exc:
-                    selection = Selection(error=f"当前聊天识别失败：{getattr(exc, 'strerror', None) or str(exc) or type(exc).__name__}")
+                    if selection.error:
+                        self.report_reader_error("自动跟随", RuntimeError(selection.error))
+                    else:
+                        self.report_reader_recovered("自动跟随")
+                except Exception as exc:
+                    self.report_reader_error("自动跟随", exc)
+                    follower = None
+                    selection = Selection(error=f"当前聊天识别失败，正在重试：{type(exc).__name__}: {exc}")
                 try:
                     self.follow_queue.put_nowait(selection)
                 except queue.Full:
@@ -879,7 +1046,7 @@ class UsagePanel:
                         self.follow_queue.put_nowait(selection)
                     except queue.Full:
                         pass
-                self.follow_stop.wait(0.5)
+                self.follow_stop.wait(1.0 if selection.error else 0.5)
 
         self.follow_worker = threading.Thread(target=worker, daemon=True, name="CodexCurrentChat")
         self.follow_worker.start()
@@ -904,6 +1071,11 @@ class UsagePanel:
     def publish_status(self):
         data = {"running": not self.closed, "process_id": os.getpid(), "close_reason": self.close_reason,
                 "auto_follow": self.follow_enabled,
+                "follow_reader_alive": bool(self.follow_worker and self.follow_worker.is_alive()),
+                "usage_reader_alive": bool(self.worker and self.worker.is_alive()),
+                "material": "acrylic" if self.material and self.material.enabled else "solid",
+                "material_reason": self.material.reason if self.material else "尚未初始化",
+                "animation_enabled": self.animation_enabled,
                 "session_id": self.snapshot.session_id, "mode": self.mode,
                 "route": self.follow_selection.route if self.follow_enabled else "",
                 "source_log": self.follow_selection.source_log if self.follow_enabled else "",
@@ -933,11 +1105,23 @@ class UsagePanel:
     def tick(self):
         if self.closed:
             return
+        self.poll_job = None
+        try:
+            self.refresh_state()
+            self.report_reader_recovered("界面刷新")
+        except Exception as exc:
+            self.report_reader_error("界面刷新", exc)
+        finally:
+            # An unexpected callback failure must not permanently cancel all future updates.
+            if not self.closed:
+                self.poll_job = self.root.after(150, self.tick)
+
+    def refresh_state(self):
         if self.close_signal is not None and self.close_signal.pending():
             self.close(reason="codex_closed")
             return
         self.ensure_visible()
-        changed = False
+        changed = self.ensure_readers()
         latest_selection = None
         try:
             while True:
@@ -945,7 +1129,7 @@ class UsagePanel:
         except queue.Empty:
             pass
         if latest_selection is not None:
-            changed = self.apply_follow_selection(latest_selection)
+            changed = self.apply_follow_selection(latest_selection) or changed
         try:
             while True:
                 generation, snapshot = self.queue.get_nowait()
@@ -958,7 +1142,6 @@ class UsagePanel:
             self.render()
         self.refresh_transient()
         self.publish_status()
-        self.poll_job = self.root.after(150, self.tick)
 
     def toggle_mode(self):
         self.set_mode("last" if self.mode == "total" else "total")
@@ -984,7 +1167,7 @@ class UsagePanel:
         for mode, label in (("total", "会话累计"), ("last", "最近调用")):
             menu.add_radiobutton(label=label, value=mode, variable=self.scope_variable,
                                  command=lambda value=mode: self.set_mode(value))
-        self.popup_menu(menu, self.canvas.winfo_rootx() + self.px(253), self.canvas.winfo_rooty() + self.px(42))
+        self.popup_menu(menu, self.canvas.winfo_rootx() + self.px(264), self.canvas.winfo_rooty() + self.px(48))
 
     def popup_menu(self, menu, x, y):
         self.menu_open = True
@@ -1161,6 +1344,9 @@ class UsagePanel:
         self.publish_status()
         if self.poll_job:
             self.root.after_cancel(self.poll_job)
+        if self.animation_job:
+            self.root.after_cancel(self.animation_job)
+            self.animation_job = None
         self.hide_tooltip()
         self.root.destroy()
 

@@ -50,6 +50,25 @@ class FollowTests(unittest.TestCase):
         self.append(navigation("/local/" + A, 3))
         self.assertEqual(self.follower.poll().session_id, A)
 
+    def test_background_start_uses_main_window_not_newer_utility_log(self):
+        self.append(navigation("/local/" + A))
+        utility = self.day / f"codex-desktop-{APP_ID}-48300-t0-i1-092623-0.log"
+        utility.write_text("utility process without navigation\n", encoding="utf-8")
+        self.alive.add(48300)
+        self.follower.foreground = lambda: 90000  # A different app owns focus.
+        self.follower.main_window = lambda: 47300
+        for previous in (None, 48300):
+            self.follower.pid = previous
+            self.follower.last_discovery = -float("inf")
+            self.assertEqual(self.follower.poll().session_id, A)
+            self.assertEqual(self.follower.pid, 47300)
+
+    def test_foreground_codex_keeps_priority_over_default_main_window(self):
+        self.append(navigation("/local/" + A))
+        self.follower.main_window = lambda: 48300
+        self.assertEqual(self.follower.poll().session_id, A)
+        self.assertEqual(self.follower.pid, 47300)
+
     def test_background_usage_resume_and_reply_do_not_switch(self):
         self.append(navigation("/local/" + A))
         self.follower.poll()
