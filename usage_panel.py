@@ -21,7 +21,10 @@ from active_session import DesktopSessionFollower, Selection
 from codex_autostart import PANEL_MUTEX_NAME, PanelCloseSignal
 from generation_speed import SpeedSample, SpeedTracker, speed_label
 from app_runtime import app_command, load_config
-from panel_visuals import WindowMaterial, robot_pose, visual_preferences
+from panel_visuals import (WindowMaterial, visual_preferences, THEMES, ICONS,
+                           DEFAULT_THEME, appearance_ids)
+from panel_icons import IconImages, frame_for
+from panel_menu import ThemedMenu
 
 
 APP_TITLE = "Codex 实时用量"
@@ -383,6 +386,7 @@ def singleton():
 
 
 class UsagePanel:
+    theme = THEMES[DEFAULT_THEME]
     WIDTH = 912
     BAR_HEIGHT = 56
     EXPANDED_HEIGHT = 372
@@ -407,6 +411,8 @@ class UsagePanel:
         self.mode = self.saved.get("mode", "total")
         if self.mode not in ("total", "last"):
             self.mode = "total"
+        self.theme_id, self.icon = appearance_ids(self.saved.get("theme"), self.saved.get("icon"))
+        self.theme = THEMES[self.theme_id]
         self.topmost = bool(self.saved.get("topmost", True))
         self.expanded = False
         self.snapshot = Snapshot()
@@ -428,20 +434,25 @@ class UsagePanel:
         self.button_fills = {}
         self.copy_until = 0
         self.scope_menu = None
+        self.appearance_menus = {}
+        self.context_popup = None
         self.menu_open = False
         self.pressed_action = None
         self.scope_variable = tk.StringVar(root, value=self.mode)
+        self.theme_variable = tk.StringVar(root, value=self.theme_id)
+        self.icon_variable = tk.StringVar(root, value=self.icon)
         self.fonts = {}
         self.poll_job = None
         self.animation_job = None
         self.animation_start = time.monotonic()
         self.animation_enabled = True
-        self.robot_parts = []
-        self.robot_frame = None
+        self.icon_images = IconImages(root)
+        self.icon_image = None
+        self.icon_frame = None
         self.material = None
         self.preferences = None
         self.preference_check = 0
-        self.background = BACKGROUND
+        self.background = self.theme.background
         self.drag_origin = None
         self.resize_origin = None
         try:
@@ -486,7 +497,7 @@ class UsagePanel:
             self.start_reader()
         self.render()
         self.poll_job = root.after(100, self.tick)
-        self.animation_job = root.after(100, self.animate_robot)
+        self.animation_job = root.after(100, self.animate_icon)
 
     def px(self, value):
         return int(round(value * self.scale))
@@ -579,13 +590,13 @@ class UsagePanel:
                                           size=-pixels, weight="bold" if bold else "normal")
         return self.fonts[key]
 
-    def text(self, x, y, value, color=TEXT, size=12, anchor="w", bold=False, mono=False, tags=()):
-        return self.canvas.create_text(self.px(x), self.px(y), text=value, fill=color,
+    def text(self, x, y, value, color=None, size=12, anchor="w", bold=False, mono=False, tags=()):
+        return self.canvas.create_text(self.px(x), self.px(y), text=value, fill=color or self.theme.text,
                                        font=self.font(size, bold, mono), anchor=anchor, tags=tags)
 
-    def line(self, x1, y1, x2, y2, color=BORDER, width=1, tags=()):
+    def line(self, x1, y1, x2, y2, color=None, width=1, tags=()):
         return self.canvas.create_line(self.px(x1), self.px(y1), self.px(x2), self.px(y2),
-                                       fill=color, width=self.px(width), tags=tags)
+                                       fill=color or self.theme.border, width=self.px(width), tags=tags)
 
     def rounded(self, x1, y1, x2, y2, radius, fill, outline="", tags=()):
         coords = [x1+radius,y1, x2-radius,y1, x2,y1, x2,y1+radius,
@@ -611,7 +622,9 @@ class UsagePanel:
         return self.snapshot.total if self.mode == "total" else self.snapshot.last
 
     def state(self):
-        return display_state(self.snapshot, self.follow_enabled, self.follow_selection)
+        state, reason, color = display_state(self.snapshot, self.follow_enabled, self.follow_selection)
+        return state, reason, {AMBER: self.theme.warning, MUTED: self.theme.muted,
+                              GREEN: self.theme.success}[color]
 
     def session_name(self):
         return self.titles.get(self.snapshot.session_id) or (
@@ -682,11 +695,11 @@ class UsagePanel:
             callback()
 
     def hitbox(self, x1, x2, tag, y1=8, y2=48, selected=False):
-        fill = SELECTED if selected else self.background
+        fill = self.theme.selected if selected else self.background
         self.button_fills[tag] = fill
         self.rounded(x1, y1, x2, y2, 6, fill, tags=("button", tag, tag + "_bg"))
 
-    def number(self, right, y, value, width, color=TEXT, size=13, bold=False, tags=()):
+    def number(self, right, y, value, width, color=None, size=13, bold=False, tags=()):
         # Keep exact, right-aligned digits even for large cumulative counts and DPI scaling.
         minimum = 15 if size >= 15 else 12
         while size > minimum and self.font(size, bold, True).measure(value) > self.px(width):
@@ -705,39 +718,40 @@ class UsagePanel:
         c = self.canvas
         c.delete("all")
         height = self.EXPANDED_HEIGHT if self.expanded else self.BAR_HEIGHT
-        self.rounded(1, 1, self.WIDTH-1, height-1, 12, self.background, BORDER)
-        self.line(14, 2, self.WIDTH-14, 2, "#526575")
+        self.rounded(1, 1, self.WIDTH-1, height-1, 12, self.background, self.theme.border)
+        self.line(14, 2, self.WIDTH-14, 2, self.theme.border)
         usage, rate = self.current_usage, self.current_usage.cache_rate
         state, reason, state_color = self.state()
-        self.draw_robot()
-        self.hint("state", f"{state}：{reason}\n机器人动效只表示任务状态，不表示实时生成速度")
+        self.draw_icon()
+        self.hint("state", f"{state}：{reason}\n图标：{ICONS[self.icon]} · 主题：{self.theme.name}"
+                  "\n动效只表示任务状态，不表示实时生成速度")
         self.line(62, 17, 62, 39)
         self.draw_speed()
         self.hitbox(264, 375, "scope")
-        self.text(276, 28, self.scope_label, TEXT, 12, tags=("button", "scope"))
-        self.line(357, 26, 361, 30, MUTED, tags=("button", "scope"))
-        self.line(361, 30, 365, 26, MUTED, tags=("button", "scope"))
+        self.text(276, 28, self.scope_label, self.theme.text, 12, tags=("button", "scope"))
+        self.line(357, 26, 361, 30, self.theme.muted, tags=("button", "scope"))
+        self.line(361, 30, 365, 26, self.theme.muted, tags=("button", "scope"))
         self.action("scope", self.open_scope_menu, "选择会话累计或最近调用：影响用量及缓存命中率，均速保持本轮最近已结算调用口径")
         total_label = self.metric_label(compact(usage.total_tokens), usage.total_tokens, 104)
-        self.number(488, 28, total_label, 104, ACCENT, 20, True, ("tokens", "compact_total"))
-        self.text(500, 29, "tok", MUTED, 12, tags=("tokens",))
+        self.number(488, 28, total_label, 104, self.theme.accent, 20, True, ("tokens", "compact_total"))
+        self.text(500, 29, "tok", self.theme.muted, 12, tags=("tokens",))
         self.hint("tokens", self.usage_hint)
         self.line(536, 17, 536, 39)
-        self.text(550, 27, "缓存命中", MUTED, 12, tags=("cache",))
-        self.text(680, 27, "—" if rate is None else f"{rate:.1f}%", GREEN, 18, anchor="e", bold=True, mono=True, tags=("cache", "cache_rate"))
-        self.line(550, 41, 680, 41, BORDER, 2, ("cache",))
+        self.text(550, 27, "缓存命中", self.theme.muted, 12, tags=("cache",))
+        self.text(680, 27, "—" if rate is None else f"{rate:.1f}%", self.theme.success, 18, anchor="e", bold=True, mono=True, tags=("cache", "cache_rate"))
+        self.line(550, 41, 680, 41, self.theme.border, 2, ("cache",))
         if rate is not None and rate > 0:
-            self.line(550, 41, 550 + 130 * rate / 100, 41, GREEN, 2, ("cache",))
+            self.line(550, 41, 550 + 130 * rate / 100, 41, self.theme.success, 2, ("cache",))
         self.hint("cache", self.cache_hint)
         self.line(694, 17, 694, 39)
         following = bool(self.follow_selection.path)
         badge = ("跟随中" if following else state) if self.follow_enabled else "固定会话"
-        self.rounded(704, 11, 782, 45, 6, SURFACE, tags=("follow",))
-        self.text(743, 28, badge, ACCENT if following or not self.follow_enabled else MUTED,
+        self.rounded(704, 11, 782, 45, 6, self.theme.surface, tags=("follow",))
+        self.text(743, 28, badge, self.theme.accent if following or not self.follow_enabled else self.theme.muted,
                   12, anchor="center", tags=("follow",))
         self.hint("follow", self.follow_hint)
         self.hitbox(790, 820, "pin", selected=self.topmost)
-        pin_color = ACCENT if self.topmost else MUTED
+        pin_color = self.theme.accent if self.topmost else self.theme.muted
         self.line(800, 21, 810, 21, pin_color, 1, ("button", "pin"))
         self.line(802, 21, 802, 27, pin_color, 1, ("button", "pin"))
         self.line(808, 21, 808, 27, pin_color, 1, ("button", "pin"))
@@ -745,11 +759,11 @@ class UsagePanel:
         self.line(805, 28, 805, 35, pin_color, 1, ("button", "pin"))
         self.action("pin", self.toggle_topmost, "置顶已开启，点击取消" if self.topmost else "点击保持面板置顶")
         self.hitbox(826, 866, "details")
-        self.text(846, 28, "收起" if self.expanded else "明细", TEXT, 12, anchor="center", tags=("button", "details"))
+        self.text(846, 28, "收起" if self.expanded else "明细", self.theme.text, 12, anchor="center", tags=("button", "details"))
         self.action("details", lambda: self.set_expanded(not self.expanded), "展开或收起精确用量；Esc 可收起")
         self.hitbox(872, 904, "close")
-        self.line(884, 24, 892, 32, MUTED, tags=("button", "close"))
-        self.line(892, 24, 884, 32, MUTED, tags=("button", "close"))
+        self.line(884, 24, 892, 32, self.theme.muted, tags=("button", "close"))
+        self.line(892, 24, 884, 32, self.theme.muted, tags=("button", "close"))
         self.action("close", self.close, "关闭统计面板")
         if self.expanded:
             first = c.find_all()[-1]
@@ -757,74 +771,64 @@ class UsagePanel:
             for item in c.find_all():
                 if item > first:
                     c.move(item, 0, self.px(8))
-        self.line(self.WIDTH - 13, height - 4, self.WIDTH - 4, height - 13, MUTED, tags=("resize_grip",))
-        self.line(self.WIDTH - 8, height - 4, self.WIDTH - 4, height - 8, MUTED, tags=("resize_grip",))
+        self.line(self.WIDTH - 13, height - 4, self.WIDTH - 4, height - 13, self.theme.muted, tags=("resize_grip",))
+        self.line(self.WIDTH - 8, height - 4, self.WIDTH - 4, height - 8, self.theme.muted, tags=("resize_grip",))
         if self.resize_origin:
             self.canvas.configure(cursor=self.RESIZE_CURSORS[self.resize_origin[0]])
 
     def draw_speed(self):
-        self.text(76, 28, "均速", MUTED, 12, tags=("speed",))
+        self.text(76, 28, "均速", self.theme.muted, 12, tags=("speed",))
         speed = self.snapshot.speed
         speed_text = self.metric_label(speed_label(speed), speed.tokens_per_second, 78, "≈")
-        self.number(190, 28, speed_text, 78, ACCENT, 18, True, ("speed", "speed_value"))
-        self.text(200, 29, "tok/s", MUTED, 12, tags=("speed",))
+        self.number(190, 28, speed_text, 78, self.theme.accent, 18, True, ("speed", "speed_value"))
+        self.text(200, 29, "tok/s", self.theme.muted, 12, tags=("speed",))
         self.line(256, 17, 256, 39)
         self.hint("speed", self.speed_hint)
 
-    def draw_robot(self):
-        c = self.canvas
+    def draw_icon(self):
         self.rounded(8, 7, 54, 49, 7, self.background, tags=("state",))
-        self.line(30, 13, 30, 19, ACCENT, 1, ("state", "robot", "robot_ink"))
-        c.create_oval(self.px(28), self.px(10), self.px(32), self.px(14), fill=ACCENT,
-                      outline="", tags=("state", "robot", "robot_ink"))
-        for left, right in ((12, 16), (44, 48)):
-            self.rounded(left, 25, right, 33, 2, SURFACE, ACCENT, ("state", "robot", "robot_shell"))
-        self.rounded(16, 18, 44, 40, 6, SURFACE, ACCENT, ("state", "robot", "robot_shell"))
-        self.line(26, 35, 34, 35, ACCENT, 1, ("state", "robot", "robot_ink"))
-        self.robot_eyes = [c.create_oval(0, 0, 1, 1, fill=ACCENT, outline="", tags=("state", "robot", "robot_ink")) for _ in range(2)]
-        self.robot_parts = [(item, c.coords(item)) for item in c.find_withtag("robot") if item not in self.robot_eyes]
-        self.robot_frame = None
-        self.update_robot()
+        self.canvas.create_image(self.px(8), self.px(6), anchor="nw",
+                                 tags=("state", "status_icon"))
+        self.icon_frame = None
+        self.update_icon()
 
-    def update_robot(self):
-        frame = robot_pose(self.state()[0], time.monotonic() - self.animation_start, self.animation_enabled)
-        if frame == self.robot_frame:
+    def update_icon(self):
+        frame = frame_for(self.icon, self.scale, self.state()[0],
+                          time.monotonic() - self.animation_start, self.theme, self.animation_enabled)
+        if frame == self.icon_frame:
             return
-        offset, eye, color = frame
-        for item, coords in self.robot_parts:
-            self.canvas.coords(item, *[value + (self.px(offset) if index % 2 else 0)
-                                       for index, value in enumerate(coords)])
-        for item, x in zip(self.robot_eyes, (23, 37)):
-            self.canvas.coords(item, self.px(x - 1.7), self.px(28 + offset - eye),
-                               self.px(x + 1.7), self.px(28 + offset + eye))
-        self.canvas.itemconfigure("robot_ink", fill=color)
-        self.canvas.itemconfigure("robot_shell", outline=color)
-        self.robot_frame = frame
+        self.icon_image = self.icon_images.get(frame)
+        self.canvas.itemconfigure("status_icon", image=self.icon_image)
+        self.icon_frame = frame
 
-    def animate_robot(self):
+    def animate_icon(self):
         self.animation_job = None
         if self.closed:
             return
         try:
-            self.update_robot()
+            self.update_icon()
         except Exception as exc:
-            self.report_reader_error("机器人绘制", exc)
+            self.report_reader_error("状态图标绘制", exc)
         finally:
             if not self.closed:
-                self.animation_job = self.root.after(65 if self.state()[0] == "生成中" else 100, self.animate_robot)
+                self.animation_job = self.root.after(65 if self.state()[0] == "生成中" else 100, self.animate_icon)
 
-    def refresh_visual_settings(self):
+    def refresh_visual_settings(self, force=False):
         now = time.monotonic()
-        if now < self.preference_check or not self.material:
+        if (not force and now < self.preference_check) or not self.material:
             return
         self.preference_check = now + 5
         preferences = visual_preferences()
-        if preferences == self.preferences:
+        if not force and preferences == self.preferences:
             return
         self.preferences = preferences
         self.animation_enabled = preferences[1]
-        self.material.apply(preferences[0])
-        self.background = "#000000" if self.material.enabled else BACKGROUND
+        # The current GDI/acrylic composition adds its tint to foreground pixels;
+        # a pale tint washes out dark ink. Use opaque light surfaces for legibility.
+        self.material.apply(preferences[0] and self.theme.glass, self.theme.background)
+        if not self.theme.glass:
+            self.material.reason = f"{self.theme.name}使用实色背景，确保深色文字清晰"
+        self.background = "#000000" if self.material.enabled else self.theme.background
         canvas_background = "#000000" if self.material.enabled else TRANSPARENT
         if os.name == "nt" and not self.material.enabled:
             self.root.attributes("-transparentcolor", TRANSPARENT)
@@ -837,44 +841,53 @@ class UsagePanel:
         right, middle = self.WIDTH - 22, self.WIDTH // 2
         self.line(18, 49, self.WIDTH - 18, 49)
         session_id = self.snapshot.session_id
-        self.text(22, 72, self.ellipsis(self.session_name(), self.WIDTH - 165, 13, True), TEXT, 13, bold=True, tags=("session", "session_title"))
-        self.text(right, 72, session_id[:8] or "尚无 ID", MUTED, 11, anchor="e", mono=True, tags=("session",))
+        self.text(22, 72, self.ellipsis(self.session_name(), self.WIDTH - 165, 13, True), self.theme.text, 13, bold=True, tags=("session", "session_title"))
+        self.text(right, 72, session_id[:8] or "尚无 ID", self.theme.muted, 11, anchor="e", mono=True, tags=("session",))
         self.hint("session", self.follow_hint)
         state, reason, state_color = self.state()
         self.text(22, 96, state, state_color, 11, tags=("detail_state",))
         self.hint("detail_state", f"{state}：{reason}")
-        self.text(right, 96, self.data_time_text(), MUTED, 11, anchor="e", tags=("data_time",))
+        self.text(right, 96, self.data_time_text(), self.theme.muted, 11, anchor="e", tags=("data_time",))
         self.hint("data_time", lambda: "用量统计记录时间（本地时区）：" + timestamp_label(self.snapshot.timestamp) +
                   "\n不是界面刷新时间；空闲时保留上次有效记录时间")
         if state in ("等待会话", "读取中", "等待统计", "读取失败"):
             self.text(22, 117, self.ellipsis(reason, self.WIDTH - 44, 11), state_color, 11, tags=("reason",))
             self.hint("reason", reason)
-        self.rounded(16, 136, self.WIDTH - 16, 287, 8, SURFACE)
-        self.text(28, 154, f"{self.scope_label}用量 · tokens", MUTED, 11, tags=("usage_scope",))
+        self.rounded(16, 136, self.WIDTH - 16, 287, 8, self.theme.surface)
+        self.text(28, 154, f"{self.scope_label}用量 · tokens", self.theme.muted, 11, tags=("usage_scope",))
         self.hint("usage_scope", self.usage_hint)
-        self.line(middle, 175, middle, 247, BORDER)
+        self.line(middle, 175, middle, 247, self.theme.border)
         entries = [
-            (28, 183, "输入总量", usage.input_tokens, middle - 24, TEXT, True, "input"),
-            (44, 210, "已缓存", usage.cached_input_tokens, middle - 24, GREEN, False, "cached"),
-            (44, 237, "未缓存", usage.uncached_input, middle - 24, MUTED, False, "uncached"),
-            (middle + 20, 183, "输出总量", usage.output_tokens, right - 8, TEXT, True, "output"),
-            (middle + 36, 210, "其中推理", usage.reasoning_output_tokens, right - 8, MUTED, False, "reasoning"),
+            (28, 183, "输入总量", usage.input_tokens, middle - 24, self.theme.text, True, "input"),
+            (44, 210, "已缓存", usage.cached_input_tokens, middle - 24, self.theme.success, False, "cached"),
+            (44, 237, "未缓存", usage.uncached_input, middle - 24, self.theme.muted, False, "uncached"),
+            (middle + 20, 183, "输出总量", usage.output_tokens, right - 8, self.theme.text, True, "output"),
+            (middle + 36, 210, "其中推理", usage.reasoning_output_tokens, right - 8, self.theme.muted, False, "reasoning"),
         ]
         for x, y, label, number, value_x, color, bold, tag in entries:
-            self.text(x, y, label, TEXT if bold else MUTED, 12, bold=bold, tags=(tag,))
+            self.text(x, y, label, self.theme.text if bold else self.theme.muted, 12, bold=bold, tags=(tag,))
             self.number(value_x, y, exact(number), value_x-x-90, color, 14 if bold else 13, bold, (tag, tag + "_value"))
             self.hint(tag, self.usage_hint)
         self.line(28, 255, right - 8, 255)
-        self.text(28, 272, "总用量", TEXT, 12, bold=True, tags=("total",))
-        self.text(95, 272, "= 输入 + 输出", MUTED, 11, tags=("total",))
-        self.number(right - 8, 272, exact(usage.total_tokens), self.WIDTH - 250, ACCENT, 15, True, ("total", "total_value"))
+        self.text(28, 272, "总用量", self.theme.text, 12, bold=True, tags=("total",))
+        self.text(95, 272, "= 输入 + 输出", self.theme.muted, 11, tags=("total",))
+        self.number(right - 8, 272, exact(usage.total_tokens), self.WIDTH - 250, self.theme.accent, 15, True, ("total", "total_value"))
         self.hint("total", self.usage_hint)
-        self.text(22, 309, self.ellipsis(self.call_summary(), self.WIDTH - 44, 12), ACCENT, 12, tags=("call_summary",))
+        self.text(22, 309, self.ellipsis(self.call_summary(), self.WIDTH - 44, 12), self.theme.accent, 12, tags=("call_summary",))
         self.hint("call_summary", lambda: self.call_summary() + "\n" + self.speed_hint())
-        self.text(22, 341, "统计口径 ⓘ", MUTED, 11, tags=("method",))
+        self.text(22, 341, "统计口径 ⓘ", self.theme.muted, 11, tags=("method",))
         self.hint("method", self.method_hint)
+        for kind, x1, x2, label in (
+                ("theme", 236, 416, f"主题：{self.theme.name}"),
+                ("icon", 442, 650, f"图标：{ICONS[self.icon]}")):
+            self.hitbox(x1, x2, kind, 326, 356)
+            self.text(x1 + 12, 341, label, self.theme.text, 11, tags=("button", kind, kind + "_label"))
+            self.line(x2 - 20, 339, x2 - 16, 343, self.theme.muted, tags=("button", kind))
+            self.line(x2 - 16, 343, x2 - 12, 339, self.theme.muted, tags=("button", kind))
+            self.action(kind, lambda value=kind: self.open_appearance_menu(value),
+                        "主题与图标独立选择，切换立即生效并保存；也可从右键菜单选择")
         self.hitbox(self.WIDTH - 115, self.WIDTH - 20, "copy", 326, 356)
-        self.text(self.WIDTH - 67, 341, "已复制" if self.copy_until else "复制统计", ACCENT, 11,
+        self.text(self.WIDTH - 67, 341, "已复制" if self.copy_until else "复制统计", self.theme.accent, 11,
                   anchor="center", tags=("button", "copy", "copy_label"))
         self.action("copy", self.copy_stats, "复制当前范围的精确用量、缓存命中率、速度口径及数据时间")
 
@@ -896,7 +909,7 @@ class UsagePanel:
             return
         self.hovered_tag = tag
         if clickable:
-            self.canvas.itemconfigure(tag + "_bg", fill=HOVER)
+            self.canvas.itemconfigure(tag + "_bg", fill=self.theme.hover)
         self.canvas.configure(cursor="hand2" if clickable else "")
         def show():
             hint = self.hints.get(tag, "")
@@ -908,7 +921,7 @@ class UsagePanel:
         tip = tk.Toplevel(self.root)
         tip.overrideredirect(True)
         tip.attributes("-topmost", True)
-        label = tk.Label(tip, text=text, bg=SURFACE, fg=TEXT, padx=12, pady=9,
+        label = tk.Label(tip, text=text, bg=self.theme.surface, fg=self.theme.text, padx=12, pady=9,
                          justify="left", font=self.font(11), relief="solid", bd=1,
                          wraplength=min(self.px(560), work_area(self.root)[2] - work_area(self.root)[0] - 40))
         label.pack()
@@ -1076,6 +1089,7 @@ class UsagePanel:
                 "material": "acrylic" if self.material and self.material.enabled else "solid",
                 "material_reason": self.material.reason if self.material else "尚未初始化",
                 "animation_enabled": self.animation_enabled,
+                "theme": self.theme_id, "icon": self.icon,
                 "session_id": self.snapshot.session_id, "mode": self.mode,
                 "route": self.follow_selection.route if self.follow_enabled else "",
                 "source_log": self.follow_selection.source_log if self.follow_enabled else "",
@@ -1160,24 +1174,72 @@ class UsagePanel:
         self.hide_tooltip()
         if self.scope_menu is not None:
             self.scope_menu.destroy()
-        menu = self.scope_menu = tk.Menu(self.root, tearoff=False, bg=SURFACE, fg=TEXT,
-                                         activebackground=HOVER, activeforeground=TEXT,
-                                         selectcolor=ACCENT, font=self.font(12))
+        menu = self.scope_menu = self.new_menu()
         self.scope_variable.set(self.mode)
         for mode, label in (("total", "会话累计"), ("last", "最近调用")):
             menu.add_radiobutton(label=label, value=mode, variable=self.scope_variable,
                                  command=lambda value=mode: self.set_mode(value))
         self.popup_menu(menu, self.canvas.winfo_rootx() + self.px(264), self.canvas.winfo_rooty() + self.px(48))
 
+    def new_menu(self, parent=None):
+        return tk.Menu(parent or self.root, tearoff=False, bg=self.theme.surface, fg=self.theme.text,
+                       activebackground=self.theme.hover, activeforeground=self.theme.text,
+                       disabledforeground=self.theme.muted, selectcolor=self.theme.accent, font=self.font(12))
+
+    def appearance_menu(self, kind, parent=None):
+        menu = self.new_menu(parent)
+        if kind == "theme":
+            variable, selected, setter = self.theme_variable, self.theme_id, self.set_theme
+            options = [(key, value.name) for key, value in THEMES.items()]
+        else:
+            variable, selected, setter = self.icon_variable, self.icon, self.set_icon
+            options = ICONS.items()
+        variable.set(selected)
+        for value, label in options:
+            menu.add_radiobutton(label=label, value=value, variable=variable,
+                                 command=lambda selected=value: setter(selected))
+        return menu
+
+    def open_appearance_menu(self, kind):
+        self.hide_tooltip()
+        previous = self.appearance_menus.get(kind)
+        if previous is not None:
+            previous.destroy()
+        menu = self.appearance_menus[kind] = self.appearance_menu(kind)
+        x = 236 if kind == "theme" else 442
+        self.popup_menu(menu, self.canvas.winfo_rootx() + self.px(x), self.canvas.winfo_rooty() + self.px(364))
+
+    def set_theme(self, theme_id):
+        if theme_id not in THEMES or theme_id == self.theme_id:
+            return
+        self.hide_tooltip()
+        self.theme_id, self.theme = theme_id, THEMES[theme_id]
+        self.theme_variable.set(theme_id)
+        self.refresh_visual_settings(force=True)
+        self.save_settings()
+        self.publish_status()
+
+    def set_icon(self, icon):
+        if icon not in ICONS or icon == self.icon:
+            return
+        self.hide_tooltip()
+        self.icon = icon
+        self.icon_variable.set(icon)
+        self.animation_start = time.monotonic()
+        self.render()
+        self.save_settings()
+        self.publish_status()
+
     def popup_menu(self, menu, x, y):
         self.menu_open = True
         self.hide_tooltip()
         try:
-            menu.tk_popup(x, y)
+            ThemedMenu(self.root, menu, self.theme, self.font(12), self.scale,
+                       work_area(self.root)).show(x, y)
         finally:
-            menu.grab_release()
             self.menu_open = False
-            self.hide_tooltip()
+            if not self.closed:
+                self.hide_tooltip()
 
     def toggle_topmost(self):
         self.topmost = not self.topmost
@@ -1260,10 +1322,13 @@ class UsagePanel:
 
     def context_menu(self, event):
         self.hide_tooltip()
-        menu = tk.Menu(self.root, tearoff=False, bg=SURFACE, fg=TEXT, activebackground=BORDER,
-                       activeforeground=TEXT, font=self.font(12))
+        if self.context_popup is not None:
+            self.context_popup.destroy()
+        menu = self.context_popup = self.new_menu()
         menu.add_command(label="展开明细" if not self.expanded else "收起明细", command=lambda: self.set_expanded(not self.expanded))
         menu.add_command(label="切换到最近调用" if self.mode == "total" else "切换到会话累计", command=self.toggle_mode)
+        menu.add_cascade(label=f"主题：{self.theme.name}", menu=self.appearance_menu("theme", menu))
+        menu.add_cascade(label=f"图标：{ICONS[self.icon]}", menu=self.appearance_menu("icon", menu))
         menu.add_command(label="自动跟随当前聊天" if self.follow_enabled else "跟踪指定日志", state="disabled")
         menu.add_command(label="取消置顶" if self.topmost else "保持置顶", command=self.toggle_topmost)
         menu.add_command(label="恢复默认大小", command=self.reset_size)
@@ -1323,7 +1388,7 @@ class UsagePanel:
             self.compact_position = (self.root.winfo_x(), self.root.winfo_y())
         x, y = self.compact_position
         value = {"session": str(self.path), "mode": self.mode, "topmost": self.topmost,
-                 "x": x, "y": y}
+                 "x": x, "y": y, "theme": self.theme_id, "icon": self.icon}
         if not math.isclose(self.zoom, 1.0):
             value["zoom"] = round(self.zoom, 6)
         temporary = self.state_dir / "settings.tmp"
@@ -1348,6 +1413,8 @@ class UsagePanel:
             self.root.after_cancel(self.animation_job)
             self.animation_job = None
         self.hide_tooltip()
+        self.icon_images.clear()
+        self.icon_image = None
         self.root.destroy()
 
 

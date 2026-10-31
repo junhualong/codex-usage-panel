@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import sys
 
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 APP_NAME = "Codex Usage Panel"
 REPOSITORY = "https://github.com/junhualong/codex-usage-panel"
 

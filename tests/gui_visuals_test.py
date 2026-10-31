@@ -1,4 +1,4 @@
-"""B-theme checks on isolated Tk windows; no real session or OS preference changes."""
+"""Default-theme checks on isolated Tk windows; no real session or OS preference changes."""
 from dataclasses import replace
 import time
 from types import SimpleNamespace
@@ -65,7 +65,7 @@ class VisualTests(unittest.TestCase):
         before_ids, before_stats = app.canvas.find_all(), app.stats_text()
         for elapsed in (0, .55, 5.1):
             app.animation_start = time.monotonic() - elapsed
-            app.update_robot()
+            app.update_icon()
         self.assertEqual(app.canvas.find_all(), before_ids)
         self.assertEqual(app.stats_text(), before_stats)
         self.assertEqual(app.hovered_tag, "scope")

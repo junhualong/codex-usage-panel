@@ -1,11 +1,75 @@
-"""Small Windows material adapter and state-driven, vector robot motion."""
+"""Independent panel palettes, vector icon motion, and the Windows material adapter."""
 from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+from dataclasses import dataclass
 import math
 import os
 import sys
+
+
+@dataclass(frozen=True)
+class Theme:
+    name: str
+    background: str
+    surface: str
+    border: str
+    text: str
+    muted: str
+    hover: str
+    selected: str
+    accent: str
+    success: str
+    warning: str
+    glass: bool = True
+
+
+THEMES = {
+    "classic": Theme("蓝灰经典", "#17222e", "#202f3e", "#405363", "#eef4fa", "#c1ceda",
+                     "#334c60", "#29475e", "#9ed5ff", "#8ed6b2", "#f0c68b"),
+    "obsidian": Theme("曜石灰", "#171b22", "#232a34", "#536070", "#f3f6fa", "#bbc6d2",
+                      "#35404e", "#344353", "#cdd9e7", "#9bd7b8", "#f0c68b"),
+    "frost": Theme("雾凇白", "#f3f6fa", "#e8eef4", "#9aaabb", "#172b3b", "#465d70",
+                   "#dce7f2", "#d1e2f4", "#185a9d", "#216c4e", "#984009", False),
+    "teal": Theme("松石青", "#102d30", "#1c3c3f", "#4a7372", "#e8f6f2", "#b9d5ce",
+                  "#2c5052", "#2a5656", "#9be0d1", "#badf9c", "#f0c68b"),
+    "nebula": Theme("星云紫", "#262235", "#352f47", "#716183", "#f5f0fc", "#d0c6df",
+                    "#50425f", "#4d3c65", "#d6bdff", "#a5dcc9", "#f0c68b"),
+    "sand": Theme("暖砂金", "#302a24", "#3f372e", "#7c6b56", "#fff4e5", "#decdb8",
+                  "#574a3c", "#5a4935", "#eed1a0", "#b7d6b5", "#ffd18a"),
+}
+DEFAULT_THEME = "classic"
+ICONS = {"terminal": "终端光标", "robot": "微型机器人", "pulse": "数据脉冲",
+         "orbit": "轨道星核", "gear": "齿轮核心"}
+DEFAULT_ICON = "robot"
+
+
+def appearance_ids(theme, icon):
+    """Old or damaged preferences fall back independently, never as a paired preset."""
+    return (theme if isinstance(theme, str) and theme in THEMES else DEFAULT_THEME,
+            icon if isinstance(icon, str) and icon in ICONS else DEFAULT_ICON)
+
+
+def icon_pose(icon, state, elapsed, animate=True):
+    """Only explicit task activity animates; idle robot blinking keeps its old behavior."""
+    active = animate and state == "生成中"
+    if icon == "robot":
+        return robot_pose(state, elapsed, animate)[:2]
+    if icon == "terminal":
+        return (0.5 + 0.5 * math.cos(elapsed * math.tau / 1.8) if active else 1.0,)
+    if icon == "pulse":
+        return tuple(4 + 5 * math.sin(elapsed * 2.5 + index * .7) ** 2 for index in range(5)) if active else (3, 6, 9, 6, 3)
+    if icon == "orbit":
+        return ((elapsed % 6) * math.tau / 6 if active else 0.0,)
+    if icon == "gear":
+        return ((elapsed % 12) * math.tau / 12 if active else 0.0,)
+    return ()
+
+
+def acrylic_color(tint):
+    """Windows expects AABBGGRR; opacity applies to the material, not foreground text."""
+    return 0xD9000000 | int(tint[5:7] + tint[3:5] + tint[1:3], 16)
 
 
 class AccentPolicy(ctypes.Structure):
@@ -89,12 +153,12 @@ class WindowMaterial:
             self.reason = f"毛玻璃不可用，使用实色背景：{exc}"
             self.hwnd = None
 
-    def apply(self, allowed):
+    def apply(self, allowed, tint=THEMES[DEFAULT_THEME].background):
         self.enabled = False
         if not self.hwnd:
             return
-        # AABBGGRR: a stable blue-gray tint, with the Canvas's black revealing blur.
-        accent = AccentPolicy(4 if allowed else 0, 2, 0xD92E2217, 0)
+        # Canvas black reveals the selected material; labels remain fully opaque.
+        accent = AccentPolicy(4 if allowed else 0, 2, acrylic_color(tint), 0)
         data = CompositionData(19, ctypes.addressof(accent), ctypes.sizeof(accent))
         try:
             self.root.attributes("-transparentcolor", "")

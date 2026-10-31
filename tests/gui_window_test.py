@@ -81,7 +81,8 @@ class WindowInteractionTests(unittest.TestCase):
                 self.root.update()
                 before = self.app.scale
                 self.app.canvas.event_generate("<Motion>", x=self.app.px(x), y=self.app.px(y))
-                self.root.update()
+                # Inspect this injected event before update() can deliver a native
+                # mouse move at the physical cursor's unrelated screen position.
                 self.assertEqual(self.app.canvas.cget("cursor"), self.app.RESIZE_CURSORS[edge], edge)
                 self.gesture(x, y, dx, dy)
                 self.assertGreater(self.app.scale, before, (expanded, edge))

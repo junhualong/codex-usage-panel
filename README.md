@@ -8,7 +8,7 @@ Windows 桌面上的 Codex 本地用量面板：自动跟随主窗口当前聊�
 
 使用 **Windows 10 / 11 x64** 和本机 Codex 桌面应用。便携包内置运行环境，无需安装 Python、PowerShell 7 或其他依赖，也无需管理员权限。
 
-1. 获取 `CodexUsagePanel-v1.0.4-windows-x64.zip`，把整个 `CodexUsagePanel` 文件夹解压到固定位置。
+1. 获取 `CodexUsagePanel-v1.0.5-windows-x64.zip`，把整个 `CodexUsagePanel` 文件夹解压到固定位置。
 2. 双击 `CodexUsagePanel.exe`。入口会启动后台监听；Codex 已打开时显示面板，否则等待 Codex 打开。
 3. 如需重启电脑后自动使用，勾选“登录 Windows 后自动待命，随 Codex 打开和关闭面板”。
 4. 可点击“创建桌面快捷方式”。关闭启动设置窗口后，后台监听继续运行。
@@ -18,6 +18,15 @@ Windows 桌面上的 Codex 本地用量面板：自动跟随主窗口当前聊�
 项目：[junhualong/codex-usage-panel](https://github.com/junhualong/codex-usage-panel)。从 [Releases](https://github.com/junhualong/codex-usage-panel/releases) 下载便携 ZIP，旧版本也保留在该页面；源码的“Download ZIP”不能代替便携包。仓库也提供手动运行的 GitHub Actions 构建流程，产物在该次运行的 Artifacts 中。
 
 当前构建未做数字签名。支持目标为 Windows 10/11 x64；本地已验证 Windows 11，尚未完成其他电脑或干净虚拟机上的验收。
+
+## v1.0.5 更新
+
+- 在明细底部或右键菜单中分别选择“主题”和“图标”，选项带当前标记，立即生效并保存；切换任一项保留另一项，重启后恢复原组合。
+- 主题保留“蓝灰经典”，新增曜石灰、雾凇白、松石青、星云紫、暖砂金；五种图标为终端光标、微型机器人、数据脉冲、轨道星核、齿轮核心。共可自由组合 30 种外观。
+- 图标、数值、明细、菜单、悬浮提示与毛玻璃色调使用所选主题；改变外观不改变统计范围、会话、窗口大小、位置或置顶状态。旧设置默认使用蓝灰经典与微型机器人。
+- 深色主题使用原生毛玻璃；雾凇白使用实色浅底，避免当前 Windows/Tk 合成方式使深色文字泛白，优先保证可读性。
+- 五种图标使用 6 倍分辨率绘制后抗锯齿缩小，按当前 DPI 与缩放重新生成；圆角短齿、独立轨道星核和统一笔画改善最小 80% 尺寸的辨识度。动效复用有上限的帧缓存，遵循系统动画偏好。
+- 统计范围、主题、图标及右键菜单统一使用主题色弹层和低对比度细边，去除 Windows 原生菜单的亮白外框；保留选中标记、悬停反馈、键盘导航及 Esc/点击外部关闭，靠近屏幕边缘时自动调整位置。
 
 ## v1.0.4 更新
 
@@ -75,8 +84,8 @@ Windows 桌面上的 Codex 本地用量面板：自动跟随主窗口当前聊�
 
 ## 面板和统计口径
 
-- B 版界面使用蓝灰毛玻璃与矢量机器人：空闲偶尔眨眼，生成中轻微点头，读取失败时静止并显示琥珀色；等待与读取状态使用不同静态表情。悬停机器人查看准确状态和原因，动画不表示实时生成速度。
-- 毛玻璃由 Windows 原生合成，文字保持独立绘制，不降低整个窗口的透明度。系统关闭透明效果、启用高对比度或材质接口不可用时回退到蓝灰实色；关闭系统动画时机器人显示静态帧，运行中会自动更新这些偏好。
+- 左侧为可选择的抗锯齿状态图标，随主题配色。机器人空闲偶尔眨眼；生成时分别使用光标轻闪、机器人点头、短条起伏、轨道点移动或齿轮缓慢转动。读取失败时停止动画并增加感叹号标记，悬停可查看准确状态和原因；动画不表示实时生成速度。
+- 毛玻璃由 Windows 原生合成，文字保持独立绘制，不降低整个窗口的透明度。系统关闭透明效果、启用高对比度或材质接口不可用时回退到所选主题的实色背景；关闭系统动画时所有图标保持静态，运行中会自动更新这些偏好。
 - 点击“会话累计 / 最近调用”文字或下拉箭头打开范围菜单，当前选项有标记；选择后保存偏好，并同步用量、缓存命中率、明细、悬浮说明和复制内容。最近调用指一次模型调用。
 - 明细按输入与输出分列：输入总量下的“已缓存 / 未缓存”是输入子项，输出总量下的“其中推理”是输出子项；底部独立显示总用量 = 输入 + 输出。区域单位为 tokens，精确数值使用千位分隔。
 - 缓存命中率 = 缓存命中输入 / 输入。没有有效计数时显示“—”。
@@ -113,6 +122,8 @@ python -B -X utf8 launcher.py
 
 通用入口与便携 EXE 使用相同逻辑。历史的 `usage_panel.py` 和 `codex_autostart.py` 命令仍兼容；`start_watcher.ps1` 仅保留为旧版本参考，当前运行不再调用它。
 
+图标渲染使用 Pillow，版本固定在 `requirements.txt`；更新源码后请同步安装依赖。构建脚本会记录 Pillow 版本并收集其完整许可证，便携用户仍无需单独安装。
+
 常用命令（EXE 可换成 `python launcher.py`）：
 
 ```powershell
@@ -141,7 +152,7 @@ python -m venv .local\build-venv
 构建产物：
 
 - `dist/CodexUsagePanel/`：可直接运行的完整文件夹。
-- `dist/CodexUsagePanel-v1.0.4-windows-x64.zip`：给其他人的便携包。
+- `dist/CodexUsagePanel-v1.0.5-windows-x64.zip`：给其他人的便携包。
 - `dist/SHA256SUMS.txt`：ZIP 的 SHA-256 校验值。
 
 构建只收集程序、运行时和允许分发的说明文件，并检查个人配置、会话日志是否误入包。中间文件放在 `.local/build`；`.local`、`dist`、本机配置和快捷方式都被 Git 忽略。第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，本项目自身的开源许可证尚未选择。
@@ -156,6 +167,8 @@ python -B -X utf8 tests\gui_follow_test.py
 python -B -X utf8 tests\gui_reader_recovery_test.py
 python -B -X utf8 tests\gui_panel_test.py
 python -B -X utf8 tests\gui_visuals_test.py
+python -B -X utf8 tests\gui_appearance_test.py
+python -B -X utf8 tests\gui_menu_test.py
 python -B -X utf8 tests\gui_window_test.py
 python -B -X utf8 tests\test_panel_geometry.py
 python -B -X utf8 tests\test_restart_survival.py
@@ -170,6 +183,10 @@ python -B -X utf8 tests\test_portable.py
 `gui_panel_test.py` 检查范围菜单、复制反馈、六种显示状态、长名称/大数值、80%～200% 布局与点击区域，以及屏幕边缘的展开/收起位置恢复；结果样本位于 `.local/tests/panel-ui-fixtures`。加 `--preview` 可打开合成数据预览，供人工检查排版，不读取真实聊天。
 
 `gui_window_test.py` 用隔离的 Tk 窗口验证四边约束、八个缩放方向、最小/最大尺寸、缩放记忆、展开收起锚点和屏幕变化后的恢复；负坐标屏幕、任务栏预留和小屏高 DPI 使用模拟工作区，不代替实际多显示器验收。
+
+`test_icons.py` 随逻辑测试检查透明边缘、主题颜色、动效像素变化、关闭动画及失败形状提示；`gui_appearance_test.py` 验证主题与图标独立切换和保存、重启恢复、30 种组合的布局与统计不变、图片上传及缓存回收、状态动效和屏幕底部位置恢复；同样使用隔离样本，不修改真实使用设置。
+
+`gui_menu_test.py` 在真实 Tk 弹出循环中检查主题菜单、鼠标/键盘选择、子菜单切换、失焦/外部点击/退出清理、屏幕边界与长菜单滚动；负坐标屏幕使用模拟工作区，不代替实际多显示器验收。
 
 `gui_reader_recovery_test.py` 使用独立日志和 Tk 窗口注入读取异常、后台线程退出及刷新异常，验证自动恢复、恢复后的聊天切换和增量统计，以及空闲/远程页面不误重启。
 

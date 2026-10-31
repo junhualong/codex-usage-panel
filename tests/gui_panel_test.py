@@ -82,7 +82,7 @@ class PanelGuiTests(unittest.TestCase):
     def test_scope_text_and_arrow_open_marked_menu_and_sync_every_view(self):
         app = self.app
         app.set_expanded(True)
-        with patch.object(tk.Menu, "tk_popup") as popup:
+        with patch.object(panel.ThemedMenu, "show") as popup:
             for x in (280, 361):
                 self.click(x, 28)
                 self.assertIsNone(app.drag_origin)
@@ -215,7 +215,7 @@ class PanelGuiTests(unittest.TestCase):
                             self.assertFalse(overlap, (scale, name, text, label, box, other))
                         boxes.append((box, text))
                     checked.append([scale, expanded, name])
-                with patch.object(tk.Menu, "tk_popup") as popup:
+                with patch.object(panel.ThemedMenu, "show") as popup:
                     self.click(361, 28)
                     popup.assert_called_once()
                 if expanded:

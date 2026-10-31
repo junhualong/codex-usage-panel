@@ -46,7 +46,9 @@ def collect_licenses(target):
         if not source.is_file():
             raise FileNotFoundError(f"Required bundled license: {source}")
         shutil.copyfile(source, target / name)
-    for package, suffixes in {"pyinstaller": ("COPYING.txt",), "pywin32": ("win32/license.txt", "win32com/License.txt")}.items():
+    for package, suffixes in {"pyinstaller": ("COPYING.txt",),
+                              "pywin32": ("win32/license.txt", "win32com/License.txt"),
+                              "Pillow": ("licenses/LICENSE",)}.items():
         distribution = importlib.metadata.distribution(package)
         for suffix in suffixes:
             match = next((file for file in distribution.files if str(file).endswith(suffix)), None)
@@ -86,7 +88,7 @@ def main():
         shutil.copyfile(ROOT / name, app / name)
     collect_licenses(app / "licenses")
     manifest = {"version": VERSION, "python": platform.python_version(), "platform": platform.platform(),
-                "dependencies": {name: importlib.metadata.version(name) for name in ("pyinstaller", "pyinstaller-hooks-contrib", "pywin32")}}
+                "dependencies": {name: importlib.metadata.version(name) for name in ("pyinstaller", "pyinstaller-hooks-contrib", "pywin32", "Pillow")}}
     (app / "build-info.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     forbidden = {"config.json", "settings.json", "status.json", "auth.json", "autostart-status.json"}
     files = sorted(path for path in app.rglob("*") if path.is_file())
