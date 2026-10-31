@@ -1,3 +1,4 @@
+from datetime import datetime
 import json
 import unittest
 from uuid import uuid4
@@ -26,9 +27,12 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(result["read_cache"]["hits"], 3)
 
     def test_old_usage_is_not_reported_as_disconnected(self):
-        text = format_report(self.sample())
+        report = self.sample()
+        text = format_report(report)
         self.assertIn("等待新的调用", text)
-        self.assertIn("2020-01-01", text)
+        recorded_time = datetime.fromisoformat(report["panel"]["usage_timestamp"])
+        local_time = recorded_time.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        self.assertIn("数据时间（统计记录）：" + local_time, text)
         self.assertIn("最近检查", text)
         self.assertNotIn("连接异常", text)
 
