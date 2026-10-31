@@ -7,6 +7,7 @@ from ctypes import wintypes
 import json
 import os
 from pathlib import Path
+import queue
 import subprocess
 import sys
 import time
@@ -358,6 +359,29 @@ def watch():
     lifetime = {"parent_process_id": os.getppid(), "process_in_job": process_in_job()}
     gate, previous, last_launch, last_close = LifecycleGate(), None, None, None
     child = None
+    from panel_control import request as panel_request
+    from panel_tray import TrayIcon
+    commands = queue.Queue()
+    wake = kernel.CreateEventW(None, False, False, None)
+    if not wake:
+        kernel.CloseHandle(stop)
+        kernel.CloseHandle(mutex)
+        raise ctypes.WinError(ctypes.get_last_error())
+    kernel.WaitForMultipleObjects.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE), wintypes.BOOL, wintypes.DWORD]
+    kernel.WaitForMultipleObjects.restype = wintypes.DWORD
+    handles = (wintypes.HANDLE * 2)(stop, wake)
+
+    def tray_action(action):
+        commands.put(action)
+        kernel.SetEvent(wake)
+
+    tray = None
+    tray_error = ""
+    pending_action = None
+    action_deadline = 0
+    exiting = False
+    exit_deadline = 0
+    next_scan = 0
 
     def launch():
         nonlocal child
@@ -370,7 +394,8 @@ def watch():
 
     def publish(status):
         nonlocal previous
-        status = {**status, **lifetime}
+        status = {**status, **lifetime, "tray_available": bool(tray and tray.present),
+                  "tray_error": tray_error or (tray.error if tray else "")}
         if status == previous:
             return
         temporary = state / "autostart-status.tmp"
@@ -379,25 +404,84 @@ def watch():
         previous = status
 
     try:
+        try:
+            tray = TrayIcon(tray_action)
+        except Exception as exc:
+            tray_error = str(exc)
         while kernel.WaitForSingleObject(stop, 0) == 258:
             try:
-                identity = codex_window(gate.identity)
-                event = gate.step(identity, time.monotonic(), launch, running, request_panel_close)
-                if event:
-                    if event["event"] == "panel_close_requested":
-                        last_close = dict(event, time=time.time())
+                while not commands.empty():
+                    action = commands.get_nowait()
+                    if action == "exit":
+                        exiting = True
+                        exit_deadline = time.monotonic() + 10
+                        pending_action = None
+                    elif action in ("settings", "diagnostics"):
+                        subprocess.Popen(app_command("--" + action, BASE), cwd=BASE,
+                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+                    elif not exiting and action in ("show", "hide", "recenter"):
+                        if action == "hide":
+                            pending_action = None
+                            panel_request(action)
+                        else:
+                            pending_action, action_deadline = action, time.monotonic() + 10
+                            next_scan = 0
+                if exiting:
+                    # Retry while a newly launched panel is still creating its IPC event.
+                    if running():
+                        request_panel_close()
+                        if time.monotonic() >= exit_deadline:
+                            exiting = False
+                            tray_error = "面板尚未确认退出，请打开运行状态检查后重试"
                     else:
-                        last_launch = dict(event, time=time.time())
-                publish({"running": True, "watcher_process_id": os.getpid(), "codex_window": identity,
+                        break
+                now = time.monotonic()
+                if now >= next_scan:
+                    next_scan = now + 1
+                    identity = codex_window(gate.identity)
+                    event = gate.step(identity, now, launch, running, request_panel_close) if not exiting else None
+                    if event:
+                        if event["event"] == "panel_close_requested":
+                            last_close = dict(event, time=time.time())
+                        else:
+                            last_launch = dict(event, time=time.time())
+                if pending_action:
+                    if gate.identity is None:
+                        pending_action = None
+                    elif not gate.closing:
+                        if not running():
+                            pid = launch()
+                            gate.launched = True
+                            last_launch = {"event": "panel_started", "panel_process_id": pid, "source": "tray", "time": time.time()}
+                        if panel_request(pending_action):
+                            pending_action = None
+                            tray_error = ""
+                    if pending_action and now >= action_deadline:
+                        tray_error = "面板控制入口尚未就绪，请通过启动设置重试"
+                        pending_action = None
+                if tray:
+                    try:
+                        panel_status = json.loads((state / "status.json").read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        panel_status = {}
+                    if child and child.pid != panel_status.get("process_id"):
+                        panel_status = {}
+                    tray.set_state({"codex_open": bool(gate.identity), "panel_running": running(),
+                                    "hidden": panel_status.get("hidden", False)})
+                publish({"running": True, "watcher_process_id": os.getpid(), "codex_window": gate.identity,
                          "panel_launched_for_window": gate.launched, "panel_closing": gate.closing,
                          "last_launch": last_launch, "last_close": last_close})
             except OSError as exc:
                 publish({"running": True, "watcher_process_id": os.getpid(), "error": str(exc)})
-            kernel.WaitForSingleObject(stop, 1000)
+            kernel.WaitForMultipleObjects(2, handles, False, 100 if pending_action or exiting else 1000)
     finally:
+        if tray:
+            tray.close()
         publish({"running": False, "watcher_process_id": os.getpid(),
                  "last_launch": last_launch, "last_close": last_close})
         kernel.CloseHandle(stop)
+        kernel.CloseHandle(wake)
         kernel.CloseHandle(mutex)
 
 

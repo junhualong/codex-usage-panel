@@ -1,6 +1,10 @@
 """Theme-colored popup surfaces for existing Tk menu models, without native white frames."""
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
+from functools import lru_cache
+import os
 import tkinter as tk
 
 
@@ -10,6 +14,52 @@ def menu_border(theme):
                           for i in (1, 3, 5))
 
 
+def menu_position(x, y, width, height, area, owner, gap, parent=None):
+    """Keep cascades connected and avoid the panel when either vertical side fits."""
+    left, top, right, bottom = area
+    if parent and x + width > right:
+        x = parent[0] - width + 1
+    x, y = max(left, min(x, right-width)), max(top, min(y, bottom-height))
+    ox1, oy1, ox2, oy2 = owner
+    if x + width <= ox1 or x >= ox2 or y >= oy2 + gap or y + height <= oy1 - gap:
+        return x, y
+    above, below = oy1 - gap - height, oy2 + gap
+    if parent:
+        # Stay on the same side as the parent; jumping across the panel would
+        # leave a gap that the pointer cannot cross without closing the cascade.
+        if parent[3] <= oy1 and above >= top:
+            y = min(y, above)
+        elif parent[1] >= oy2 and below + height <= bottom:
+            y = max(y, below)
+    elif below + height <= bottom:
+        y = below
+    elif above >= top:
+        y = above
+    # If neither side fits, retain the bounded popup and its existing scrolling.
+    # Native ownership still keeps every visible menu row above the panel.
+    return x, y
+
+
+@lru_cache(maxsize=1)
+def _window_api():
+    user = ctypes.WinDLL("user32", use_last_error=True)
+    user.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    user.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+    user.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                  ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    user.SetWindowPos.restype = wintypes.BOOL
+    return user
+
+
+def _frame(window):
+    return int(str(window.tk.call("wm", "frame", window)), 0)
+
+
+def _bounds(window):
+    x, y = window.winfo_x(), window.winfo_y()
+    return x, y, x + window.winfo_width(), y + window.winfo_height()
+
+
 class ThemedMenu:
     def __init__(self, owner, model, theme, font, scale, area):
         self.owner, self.model, self.theme, self.font = owner, model, theme, font
@@ -17,6 +67,7 @@ class ThemedMenu:
         self.windows = []
         self.pending = None
         self.focus_job = None
+        self.stack_job = None
 
     def show(self, x, y):
         previous_focus = self.owner.focus_get()
@@ -42,17 +93,41 @@ class ThemedMenu:
 
     def open(self, model, x, y, parent=None):
         node = _MenuWindow(self, model, parent)
-        left, top, right, bottom = self.area
-        if parent and x + node.width > right:
-            x = parent.window.winfo_x() - node.width + 1
-        x = max(left, min(x, right-node.width))
-        y = max(top, min(y, bottom-node.height))
+        x, y = menu_position(x, y, node.width, node.height, self.area, _bounds(self.owner),
+                             max(4, round(8*self.scale)), _bounds(parent.window) if parent else None)
         # Explicit '+' keeps negative desktop coordinates absolute, as on the panel.
         node.window.geometry(f"{node.width}x{node.height}+{x}+{y}")
         self.windows.append(node)
         node.window.deiconify()
         node.window.update_idletasks()
+        if os.name == "nt":
+            # Tk's master is not a native owner for override-redirect popups.
+            # Set GWLP_HWNDPARENT on the real WS_POPUP wrapper, preserving its
+            # style and the panel's pin setting (transient() changes the style).
+            ctypes.set_last_error(0)
+            previous = _window_api().SetWindowLongPtrW(
+                _frame(node.window), -8, _frame(parent.window if parent else self.owner))
+            if not previous and ctypes.get_last_error():
+                raise ctypes.WinError(ctypes.get_last_error())
+        self.restack()
         return node
+
+    def restack(self):
+        if self.stack_job is not None:
+            self.owner.after_cancel(self.stack_job)
+        self.stack_job = None
+        for node in self.windows:
+            if os.name == "nt":
+                # Raise within the existing topmost/non-topmost band, without
+                # activation or moving the owner's position in the stack.
+                if not _window_api().SetWindowPos(_frame(node.window), 0, 0, 0, 0, 0, 0x213):
+                    raise ctypes.WinError(ctypes.get_last_error())
+            else:
+                node.window.lift()
+
+    def schedule_restack(self, _event=None):
+        if self.stack_job is None and self.windows:
+            self.stack_job = self.owner.after_idle(self.restack)
 
     def trim(self, keep):
         while len(self.windows) > keep:
@@ -61,8 +136,15 @@ class ThemedMenu:
                 node.window.destroy()
             except tk.TclError:
                 pass  # The owner may have been closed while the menu was posted.
+        self.restack()
 
     def dismiss(self):
+        if self.stack_job is not None:
+            try:
+                self.owner.after_cancel(self.stack_job)
+            except tk.TclError:
+                pass
+            self.stack_job = None
         if self.focus_job is not None:
             try:
                 self.owner.after_cancel(self.focus_job)
@@ -122,9 +204,8 @@ class _MenuWindow:
         self.window = tk.Toplevel(parent.window if parent else popup.owner)
         self.window.withdraw()
         self.window.overrideredirect(True)
-        # With override-redirect, Tk/Windows transient() creates a WS_CHILD
-        # surface that can be hidden behind other apps. Keep a real popup;
-        # the Tk master, grab and focus handler already manage its lifetime.
+        # Keep a real popup; native ownership is attached after Tk maps its
+        # wrapper. transient() with override-redirect produces WS_CHILD here.
         self.window.attributes("-topmost", popup.owner.attributes("-topmost"))
         self.window.configure(bg=menu_border(popup.theme), bd=0, highlightthickness=0)
         self.window.title("用量面板选项")
@@ -140,6 +221,7 @@ class _MenuWindow:
         self.window.bind("<ButtonPress-3>", popup.outside)
         self.window.bind("<KeyPress>", self.key)
         self.window.bind("<FocusOut>", popup.focus_changed)
+        self.window.bind("<FocusIn>", popup.schedule_restack)
         self.draw()
 
     def contains(self, x, y):

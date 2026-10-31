@@ -47,6 +47,21 @@ def inspect():
     }
 
 
+def show_panel(action="show"):
+    from panel_control import request
+    result = auto.start_independent()
+    if auto.codex_window() is None:
+        return {**result, "waiting_for_codex": True}
+    if not auto.panel_is_running():
+        auto.create_independent_process(app_command("--panel"))
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if request(action):
+            return {**result, "panel_action_requested": action}
+        time.sleep(0.1)
+    raise RuntimeError("面板控制入口尚未就绪，请打开运行状态检查")
+
+
 def create_shortcut():
     import pythoncom
     from win32com.client import dynamic
@@ -145,14 +160,6 @@ def settings_window():
                 results.put((None, f"{exc}\n\n错误记录：{path}"))
         threading.Thread(target=worker, daemon=True).start()
 
-    def show_panel():
-        result = auto.start_independent()
-        if auto.codex_window() is not None:
-            # WMI keeps even a manually reopened panel outside Codex's job.
-            # The panel mutex also handles a simultaneous watcher launch.
-            auto.create_independent_process(app_command("--panel"))
-        return result
-
     def toggle_startup():
         enabled = startup.get()
         def operation():
@@ -178,7 +185,11 @@ def settings_window():
     folder.pack(side="left", padx=(0, 8))
     stop = ttk.Button(row2, text="停止面板与监听", command=lambda: run(shutdown, "正在停止…"))
     stop.pack(side="left")
-    buttons = (show, shortcut, folder, stop)
+    diagnostics = ttk.Button(row2, text="运行状态…", command=lambda: subprocess.Popen(
+        app_command("--diagnostics"), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW))
+    diagnostics.pack(side="left", padx=(8, 0))
+    buttons = (show, shortcut, folder, stop, diagnostics)
     ttk.Label(frame, text="缓存命中率 = 缓存输入 / 总输入\n≈ tok/s 为最近已结算调用的平均速度", style="Muted.TLabel").pack(anchor="w", pady=(18, 0))
 
     def update():
@@ -217,7 +228,8 @@ def settings_window():
 def main():
     parser = argparse.ArgumentParser(description="Codex 实时用量面板")
     modes = parser.add_mutually_exclusive_group()
-    for name in ("settings", "start", "watch", "panel", "install", "disable", "shutdown", "inspect"):
+    for name in ("settings", "start", "watch", "panel", "install", "disable", "shutdown", "inspect",
+                 "show", "hide", "recenter", "diagnostics"):
         modes.add_argument("--" + name, action="store_true")
     parser.add_argument("--data-dir", help="独立配置和状态目录，用于隔离测试")
     parser.add_argument("--report", help="将命令结果写入 JSON 文件")
@@ -233,6 +245,15 @@ def main():
         elif args.panel:
             from usage_panel import main as panel_main
             return panel_main([])
+        elif args.diagnostics:
+            from panel_diagnostics import main as diagnostics_main
+            diagnostics_main()
+            return 0
+        elif args.show or args.recenter:
+            result = show_panel("recenter" if args.recenter else "show")
+        elif args.hide:
+            from panel_control import request
+            result = {"panel_action_requested": "hide", "sent": request("hide")}
         else:
             ensure_config()
             if args.watch:

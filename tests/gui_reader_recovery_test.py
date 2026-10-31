@@ -203,6 +203,34 @@ class ReaderRecoveryTests(unittest.TestCase):
         self.assertEqual(content.count("repeated test fault"), 1)
         self.assertEqual(content.count("[诊断测试] 已恢复"), 1)
 
+    def test_manual_rediscovery_rejects_old_navigation_worker_results(self):
+        self.start()
+        self.ready()
+        previous, generation = self.app.follow_worker, self.app.follow_generation
+        self.app.handle_command("rediscover")
+        self.app.follow_queue.put_nowait((generation, panel.Selection(session_id=B, path=str(self.paths[B]))))
+        self.ready()
+        previous.join(2)
+        self.assertFalse(previous.is_alive())
+        self.assertIsNot(self.app.follow_worker, previous)
+        self.assertIn("已开始", self.app.last_action)
+
+    def test_cached_chat_catches_up_with_appends_while_not_selected(self):
+        self.start()
+        self.ready()
+        self.navigate("/local/" + B)
+        self.ready(B, 4400)
+        with self.paths[A].open("ab") as stream:
+            stream.write(line(event(usage(5000, 4500, 600, 100))))
+        self.navigate("/local/" + A, 3)
+        self.ready(A, 5600)
+        self.assertGreaterEqual(self.app.read_cache.summary()["hits"], 1)
+        self.assertTrue(self.app.reader_health["usage"]["reused_checkpoint"])
+        self.assertEqual(self.app.snapshot.total.cache_rate, 90)
+        self.app.handle_command("reload")
+        self.ready(A, 5600)
+        self.assertFalse(self.app.reader_health["usage"]["reused_checkpoint"])
+
 
 if __name__ == "__main__":
     panel.enable_dpi()

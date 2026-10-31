@@ -25,6 +25,7 @@ from panel_visuals import (WindowMaterial, visual_preferences, THEMES, ICONS,
                            DEFAULT_THEME, appearance_ids)
 from panel_icons import IconImages, frame_for
 from panel_menu import ThemedMenu
+from session_cache import SessionReadCache
 
 
 APP_TITLE = "Codex 实时用量"
@@ -110,6 +111,26 @@ class LogTailer:
         self.identity = None
         self.snapshot = Snapshot()
         self.speed_tracker = SpeedTracker()
+        self.prefix = self.boundary = b""
+        self.file_stamp = None
+
+    def can_resume(self):
+        """Reject replaced/truncated/rewritten logs before exposing a cached snapshot."""
+        if self.identity is None or self.file_stamp is None:
+            return False
+        try:
+            with self.path.open("rb") as stream:
+                stat = os.fstat(stream.fileno())
+                if (stat.st_dev, stat.st_ino) != self.identity or stat.st_size < self.offset:
+                    return False
+                if stat.st_size == self.file_stamp[0] and stat.st_mtime_ns != self.file_stamp[1]:
+                    return False
+                if stream.read(len(self.prefix)) != self.prefix:
+                    return False
+                stream.seek(self.offset - len(self.boundary))
+                return stream.read(len(self.boundary)) == self.boundary
+        except OSError:
+            return False
 
     def accept(self, record):
         self.speed_tracker.accept(record)
@@ -185,9 +206,14 @@ class LogTailer:
                         return self.snapshot
                 stream.seek(self.offset)
                 data = stream.read(byte_budget)
+                if self.offset < 512:
+                    self.prefix = (self.prefix + data)[:512]
+                self.boundary = (self.boundary + data)[-512:]
                 self.offset = stream.tell()
                 self.consume(data)
-                self.snapshot.loading = self.offset < os.fstat(stream.fileno()).st_size
+                after = os.fstat(stream.fileno())
+                self.snapshot.loading = self.offset < after.st_size
+                self.file_stamp = (after.st_size, after.st_mtime_ns)
                 self.snapshot.error = ""
         except FileNotFoundError:
             self.snapshot.error = "日志暂不可用，请检查会话或文件位置"
@@ -395,9 +421,22 @@ class UsagePanel:
     RESIZE_CURSORS = {"n": "size_ns", "s": "size_ns", "e": "size_we", "w": "size_we",
                       "nw": "size_nw_se", "se": "size_nw_se", "ne": "size_ne_sw", "sw": "size_ne_sw"}
 
-    def __init__(self, root, config, state_dir, session_override=None, close_signal=None):
+    def __init__(self, root, config, state_dir, session_override=None, close_signal=None, commands=None):
         self.root = root
         self.close_signal = close_signal
+        self.commands = commands
+        self.hidden = False
+        self.settings_error = ""
+        self.settings_retry_at = 0
+        self.save_notice = self.save_notice_job = None
+        self.active_popup = None
+        self.last_action = ""
+        self.reported_at = ""
+        self.heartbeat_at = 0
+        self.reader_health = {}
+        self.health_lock = threading.Lock()
+        self.read_cache = SessionReadCache()
+        self.follow_generation = 0
         self.close_reason = ""
         self.config = config
         self.state_dir = Path(state_dir)
@@ -775,6 +814,10 @@ class UsagePanel:
         self.line(self.WIDTH - 8, height - 4, self.WIDTH - 4, height - 8, self.theme.muted, tags=("resize_grip",))
         if self.resize_origin:
             self.canvas.configure(cursor=self.RESIZE_CURSORS[self.resize_origin[0]])
+        if self.active_popup:
+            # Tk may restack the layered panel while its canvas is redrawn.
+            # Restore menu order after pending drawing, without taking focus.
+            self.active_popup.schedule_restack()
 
     def draw_speed(self):
         self.text(76, 28, "均速", self.theme.muted, 12, tags=("speed",))
@@ -793,6 +836,8 @@ class UsagePanel:
         self.update_icon()
 
     def update_icon(self):
+        if self.active_popup:
+            self.active_popup.schedule_restack()
         frame = frame_for(self.icon, self.scale, self.state()[0],
                           time.monotonic() - self.animation_start, self.theme, self.animation_enabled)
         if frame == self.icon_frame:
@@ -902,6 +947,8 @@ class UsagePanel:
         if self.copy_until and time.monotonic() >= self.copy_until:
             self.copy_until = 0
             self.canvas.itemconfigure("copy_label", text="复制统计")
+        if self.settings_error and time.monotonic() >= self.settings_retry_at:
+            self.save_settings()
 
     def hover(self, event, tag, clickable=False):
         self.hide_tooltip()
@@ -988,22 +1035,55 @@ class UsagePanel:
             return True
         return False
 
+    def reader_checked(self, name, error="", generation=None, **details):
+        with self.health_lock:
+            current = self.generation if name == "usage" else self.follow_generation
+            if generation != current:
+                return
+            health = self.reader_health.setdefault(name, {})
+            health.update(last_check=datetime.now().astimezone().isoformat(timespec="seconds"), error=error, **details)
+            if not error:
+                health["last_success"] = health["last_check"]
+
+    def restart_following(self):
+        if not self.follow_enabled:
+            raise ValueError("当前为固定会话模式，请使用“重新读取统计”")
+        self.follow_stop.set()
+        self.follow_stop = threading.Event()
+        self.apply_follow_selection(Selection(loading=True, message="正在重新识别当前聊天"))
+        self.start_follow_reader()
+        self.render()
+
+    def reload_usage(self):
+        if self.follow_enabled and not self.follow_selection.path:
+            raise ValueError("尚未识别本地会话，请先重新识别当前聊天")
+        self.read_cache.invalidate(self.path)
+        self.start_reader()
+        self.render()
+
     def start_reader(self):
         self.stop.set()
         self.stop = threading.Event()
         self.generation += 1
         generation, stop, path = self.generation, self.stop, self.path
+        self.read_cache.activate(generation)
+        with self.health_lock:
+            self.reader_health["usage"] = {}
         session_id = self.follow_selection.session_id if self.follow_enabled else ""
         self.snapshot = Snapshot(session_id=session_id)
         interval = max(0.25, float(self.config.get("refresh_ms", 1000)) / 1000)
 
         def worker():
             tailer = None
+            reused = False
             while not stop.is_set():
                 try:
                     if tailer is None:
-                        tailer = LogTailer(path)
+                        tailer, reused = self.read_cache.acquire(path, generation, LogTailer)
                     copy = Snapshot(**vars(tailer.poll()))
+                    self.read_cache.store(path, generation, tailer)
+                    self.reader_checked("usage", copy.error, generation, offset=tailer.offset,
+                                        reused_checkpoint=reused, skipped=copy.skipped)
                     if copy.error:
                         self.report_reader_error("用量读取", RuntimeError(copy.error))
                     else:
@@ -1011,8 +1091,10 @@ class UsagePanel:
                 except Exception as exc:
                     self.report_reader_error("用量读取", exc)
                     # A failed batch may have advanced its offset; replay from the start.
+                    self.read_cache.invalidate(path)
                     tailer = None
                     copy = Snapshot(loading=False, error=f"用量读取异常，正在重试：{type(exc).__name__}: {exc}")
+                    self.reader_checked("usage", copy.error, generation)
                 # Navigation already identifies the chat even if its log cannot be read yet.
                 copy.session_id = copy.session_id or session_id
                 try:
@@ -1032,9 +1114,13 @@ class UsagePanel:
         self.worker.start()
 
     def start_follow_reader(self):
+        self.follow_generation += 1
+        generation, stop = self.follow_generation, self.follow_stop
+        with self.health_lock:
+            self.reader_health["follow"] = {}
         def worker():
             follower = None
-            while not self.follow_stop.is_set():
+            while not stop.is_set():
                 try:
                     if follower is None:
                         follower = DesktopSessionFollower(self.config["desktop_logs_root"], self.sessions_root,
@@ -1048,18 +1134,19 @@ class UsagePanel:
                     self.report_reader_error("自动跟随", exc)
                     follower = None
                     selection = Selection(error=f"当前聊天识别失败，正在重试：{type(exc).__name__}: {exc}")
+                self.reader_checked("follow", selection.error, generation)
                 try:
-                    self.follow_queue.put_nowait(selection)
+                    self.follow_queue.put_nowait((generation, selection))
                 except queue.Full:
                     try:
                         self.follow_queue.get_nowait()
                     except queue.Empty:
                         pass
                     try:
-                        self.follow_queue.put_nowait(selection)
+                        self.follow_queue.put_nowait((generation, selection))
                     except queue.Full:
                         pass
-                self.follow_stop.wait(1.0 if selection.error else 0.5)
+                stop.wait(1.0 if selection.error else 0.5)
 
         self.follow_worker = threading.Thread(target=worker, daemon=True, name="CodexCurrentChat")
         self.follow_worker.start()
@@ -1077,12 +1164,26 @@ class UsagePanel:
             # Never present the previous chat's counters as the newly opened chat.
             self.stop.set()
             self.generation += 1
+            self.read_cache.activate(self.generation)
+            with self.health_lock:
+                self.reader_health["usage"] = {}
             self.snapshot = Snapshot(session_id=selection.session_id, loading=selection.loading,
                                      error=selection.error, message=selection.message)
         return True
 
     def publish_status(self):
+        if time.monotonic() >= self.heartbeat_at:
+            self.reported_at = datetime.now().astimezone().isoformat(timespec="seconds")
+            self.heartbeat_at = time.monotonic() + 1
+        with self.health_lock:
+            health = {name: dict(value) for name, value in self.reader_health.items()}
         data = {"running": not self.closed, "process_id": os.getpid(), "close_reason": self.close_reason,
+                "reported_at": self.reported_at, "hidden": self.hidden,
+                "reader_health": health, "read_cache": self.read_cache.summary(),
+                "settings_error": self.settings_error, "last_action": self.last_action,
+                "session_name": self.session_name(),
+                "usage_log": str(self.path) if not self.follow_enabled or self.follow_selection.path else "",
+                "usage_log_available": bool(not self.follow_enabled or self.follow_selection.path),
                 "auto_follow": self.follow_enabled,
                 "follow_reader_alive": bool(self.follow_worker and self.follow_worker.is_alive()),
                 "usage_reader_alive": bool(self.worker and self.worker.is_alive()),
@@ -1134,12 +1235,17 @@ class UsagePanel:
         if self.close_signal is not None and self.close_signal.pending():
             self.close(reason="codex_closed")
             return
+        if self.commands:
+            for command in self.commands.pending():
+                self.handle_command(command)
         self.ensure_visible()
         changed = self.ensure_readers()
         latest_selection = None
         try:
             while True:
-                latest_selection = self.follow_queue.get_nowait()
+                generation, selection = self.follow_queue.get_nowait()
+                if generation == self.follow_generation:
+                    latest_selection = selection
         except queue.Empty:
             pass
         if latest_selection is not None:
@@ -1155,6 +1261,8 @@ class UsagePanel:
         if changed:
             self.render()
         self.refresh_transient()
+        if self.active_popup:
+            self.active_popup.schedule_restack()
         self.publish_status()
 
     def toggle_mode(self):
@@ -1234,9 +1342,10 @@ class UsagePanel:
         self.menu_open = True
         self.hide_tooltip()
         try:
-            ThemedMenu(self.root, menu, self.theme, self.font(12), self.scale,
-                       work_area(self.root)).show(x, y)
+            self.active_popup = ThemedMenu(self.root, menu, self.theme, self.font(12), self.scale, work_area(self.root))
+            self.active_popup.show(x, y)
         finally:
+            self.active_popup = None
             self.menu_open = False
             if not self.closed:
                 self.hide_tooltip()
@@ -1333,6 +1442,9 @@ class UsagePanel:
         menu.add_command(label="取消置顶" if self.topmost else "保持置顶", command=self.toggle_topmost)
         menu.add_command(label="恢复默认大小", command=self.reset_size)
         menu.add_command(label="复制当前统计", command=self.copy_stats)
+        menu.add_command(label="运行状态与诊断…", command=self.open_diagnostics)
+        if self.settings_error:
+            menu.add_command(label="设置未保存：立即重试", command=self.save_settings)
         menu.add_command(label="启动设置…", command=self.open_launcher)
         menu.add_separator()
         menu.add_command(label="退出", command=self.close)
@@ -1343,6 +1455,55 @@ class UsagePanel:
         subprocess.Popen(app_command("--settings"), stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          creationflags=subprocess.CREATE_NO_WINDOW)
+
+    def open_diagnostics(self):
+        import subprocess
+        subprocess.Popen(app_command("--diagnostics"), stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=subprocess.CREATE_NO_WINDOW)
+
+    def handle_command(self, command):
+        labels = {"show": "显示面板", "hide": "隐藏面板", "recenter": "找回面板",
+                  "rediscover": "重新识别聊天", "reload": "重新读取统计", "retry_save": "重试保存设置"}
+        try:
+            if command in ("show", "hide", "recenter"):
+                if self.active_popup:
+                    self.active_popup.dismiss()
+                self.hide_tooltip()
+                self.hide_save_notice()
+                if command == "hide":
+                    self.hidden = True
+                    self.root.withdraw()
+                else:
+                    self.hidden = False
+                    self.root.deiconify()
+                    self.root.update_idletasks()
+                    if command == "recenter":
+                        x, y = self.root.winfo_pointerxy()
+                        area = work_area(self.root, (x, y, x+1, y+1))
+                        left, top, right, bottom = area
+                        x = left + (right-left-self.px(self.WIDTH)) // 2
+                        y = top + (bottom-top-self.px(self.EXPANDED_HEIGHT if self.expanded else self.BAR_HEIGHT)) // 2
+                        self.compact_position = (x, y)
+                        self.place_window(x, y, area=area)
+                        self.render()
+                        self.save_settings()
+                    self.ensure_visible()
+                    self.root.lift()
+            elif command == "rediscover":
+                self.restart_following()
+            elif command == "reload":
+                self.reload_usage()
+            elif command == "retry_save":
+                if not self.save_settings():
+                    raise OSError(self.settings_error)
+            else:
+                raise ValueError("未知操作")
+            self.last_action = labels[command] + ("：已开始" if command in ("reload", "rediscover") else "：已完成")
+        except Exception as exc:
+            self.last_action = labels.get(command, command) + "：" + str(exc)
+            self.report_reader_error("面板操作", exc)
+        self.publish_status()
 
     def stats_text(self):
         usage = self.current_usage
@@ -1382,7 +1543,7 @@ class UsagePanel:
 
     def save_settings(self):
         if self.closed:
-            return
+            return False
         if not self.expanded:
             self.root.update_idletasks()
             self.compact_position = (self.root.winfo_x(), self.root.winfo_y())
@@ -1395,8 +1556,53 @@ class UsagePanel:
         try:
             temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
             temporary.replace(self.state_dir / "settings.json")
-        except OSError:
-            pass
+        except OSError as exc:
+            message = f"{type(exc).__name__}：{exc}"
+            changed = message != self.settings_error
+            self.settings_error = message
+            self.settings_retry_at = time.monotonic() + 5
+            self.report_reader_error("设置保存", exc)
+            if changed:
+                self.show_save_notice()
+            return False
+        self.settings_error = ""
+        self.settings_retry_at = 0
+        self.hide_save_notice()
+        self.report_reader_recovered("设置保存")
+        return True
+
+    def hide_save_notice(self):
+        if self.save_notice_job is not None:
+            self.root.after_cancel(self.save_notice_job)
+            self.save_notice_job = None
+        if self.save_notice is not None:
+            self.save_notice.destroy()
+            self.save_notice = None
+
+    def show_save_notice(self):
+        self.hide_save_notice()
+        if self.hidden:
+            return
+        tip = self.save_notice = tk.Toplevel(self.root)
+        tip.withdraw()
+        tip.overrideredirect(True)
+        tip.attributes("-topmost", True)
+        tip.configure(bg=self.theme.border)
+        label = tk.Label(tip, text="设置未保存，将自动重试\n当前外观仍生效；重启可能恢复旧设置。\n点击重试，或从右键菜单打开运行状态查看原因。",
+                         bg=self.theme.surface, fg=self.theme.warning, font=self.font(12),
+                         justify="left", wraplength=self.px(380), padx=self.px(12), pady=self.px(10))
+        label.pack(padx=1, pady=1)
+        label.bind("<Button-1>", lambda _e: self.save_settings())
+        tip.update_idletasks()
+        width, height = tip.winfo_reqwidth(), tip.winfo_reqheight()
+        area = work_area(self.root)
+        x, y = self.root.winfo_x(), self.root.winfo_y() - height - self.px(6)
+        if y < area[1]:
+            y = self.root.winfo_y() + self.root.winfo_height() + self.px(6)
+        x, y = clamp_position(x, y, width, height, area)
+        tip.geometry(f"+{x}+{y}")
+        tip.deiconify()
+        self.save_notice_job = self.root.after(8000, self.hide_save_notice)
 
     def close(self, reason="user"):
         if self.closed:
@@ -1413,6 +1619,7 @@ class UsagePanel:
             self.root.after_cancel(self.animation_job)
             self.animation_job = None
         self.hide_tooltip()
+        self.hide_save_notice()
         self.icon_images.clear()
         self.icon_image = None
         self.root.destroy()
@@ -1451,14 +1658,18 @@ def main(argv=None):
         messagebox.showerror(APP_TITLE, "面板遇到错误，详细信息已写入工作目录的 panel-error.log。", parent=root)
 
     root.report_callback_exception = report_exception
-    close_signal = None
+    from panel_control import PanelCommands
+    close_signal = commands = None
     try:
         close_signal = PanelCloseSignal()
-        UsagePanel(root, config, state_dir, args.session, close_signal=close_signal)
+        commands = PanelCommands()
+        UsagePanel(root, config, state_dir, args.session, close_signal=close_signal, commands=commands)
         root.mainloop()
     finally:
         if close_signal is not None:
             close_signal.close()
+        if commands is not None:
+            commands.close()
         if mutex:
             kernel.CloseHandle(mutex)
     return 0

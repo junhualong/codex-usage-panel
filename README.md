@@ -8,16 +8,26 @@ Windows 桌面上的 Codex 本地用量面板：自动跟随主窗口当前聊�
 
 使用 **Windows 10 / 11 x64** 和本机 Codex 桌面应用。便携包内置运行环境，无需安装 Python、PowerShell 7 或其他依赖，也无需管理员权限。
 
-1. 获取 `CodexUsagePanel-v1.0.5-windows-x64.zip`，把整个 `CodexUsagePanel` 文件夹解压到固定位置。
+1. 获取 `CodexUsagePanel-v1.0.6-windows-x64.zip`，把整个 `CodexUsagePanel` 文件夹解压到固定位置。
 2. 双击 `CodexUsagePanel.exe`。入口会启动后台监听；Codex 已打开时显示面板，否则等待 Codex 打开。
 3. 如需重启电脑后自动使用，勾选“登录 Windows 后自动待命，随 Codex 打开和关闭面板”。
-4. 可点击“创建桌面快捷方式”。关闭启动设置窗口后，后台监听继续运行。
+4. 可点击“创建桌面快捷方式”。关闭启动设置窗口后，后台监听继续运行，托盘保留操作入口；Windows 可能将图标放在任务栏的隐藏图标区域。
 
 **不要只复制 EXE。** 同目录的 `_internal` 是运行所需组件。更新时先用“停止面板与监听”，再完整替换程序文件夹。移动目录前先取消旧位置的自动启动，再从新位置启用；不同安装的启动项不会相互覆盖。
 
 项目：[junhualong/codex-usage-panel](https://github.com/junhualong/codex-usage-panel)。从 [Releases](https://github.com/junhualong/codex-usage-panel/releases) 下载便携 ZIP，旧版本也保留在该页面；源码的“Download ZIP”不能代替便携包。仓库也提供手动运行的 GitHub Actions 构建流程，产物在该次运行的 Artifacts 中。
 
 当前构建未做数字签名。支持目标为 Windows 10/11 x64；本地已验证 Windows 11，尚未完成其他电脑或干净虚拟机上的验收。
+
+## v1.0.6 更新
+
+- 托盘由现有后台监听进程管理。可显示／隐藏面板、找回到鼠标所在屏幕、打开运行诊断或启动设置，以及退出面板与监听。隐藏不停止统计；关闭 Codex 时隐藏的面板也会退出。原来的关闭按钮仍只关闭面板，本次 Codex 打开期间不会自动反复弹出，可从托盘重新显示。
+- “运行状态与诊断”可从托盘、面板右键菜单或启动设置进入，显示当前聊天、跟随方式、线程检查结果、实际读取错误和读取进度缓存。状态上报时间、最近检查／成功时间与用量“数据时间”分别展示；正常空闲不会因为统计较旧而被判为故障。
+- 诊断窗口提供重新识别聊天、重新读取统计和重试保存设置。固定会话模式不执行自动重新识别；重新读取会清除该聊天的读取缓存，不改统计范围或计数口径。“复制脱敏诊断”仅包含白名单运行字段，不包含聊天名称、会话 ID、路径或原始错误文本；本机窗口仍显示具体原因。
+- 在内存中保留最近最多六个聊天的读取检查点，包括完整统计状态、未完成日志片段及速度计时状态。切回时检查文件身份、长度、修改时间及首尾内容，再读取追加内容；替换、截断或校验不通过时重新读取。超大的未完成片段不缓存，退出后清空；这里的读取缓存与输入 token 的缓存命中率无关。
+- 设置保存失败时保留旧文件与当前界面选择，显示一次非阻塞提示并记录原因，每五秒重试。可在右键菜单或诊断窗口立即重试，成功后清除错误。统计计算及自动跟随继续运行。
+- 修复置顶横条遮挡右键菜单的问题：主菜单及子菜单保持在面板上方，统计刷新和图标动画期间继续维护层级。菜单优先在面板下方展开，下方空间不足时改到上方，保留约 8 个逻辑像素间距；子菜单根据屏幕边缘左右展开，并尽量与主菜单保持在面板同侧。空间不足时保留可见菜单区域和滚动操作，原有置顶设置不变。
+- 程序仍只在本机读取数据，不访问网络；保留原有统计口径、自动跟随和用户设置，旧版本继续在 Releases 中提供。
 
 ## v1.0.5 更新
 
@@ -101,13 +111,13 @@ Windows 桌面上的 Codex 本地用量面板：自动跟随主窗口当前聊�
 - 后台读取异常会记录原因并自动重试；会话跟随或用量读取线程意外退出时自动恢复，避免长期停留在旧聊天。界面刷新发生异常后仍会继续尝试更新；正常空闲不会触发重启。
 - 当其他应用处于前台时启动面板，优先通过已识别的 Codex 主窗口选择导航日志，避免误选同名辅助进程后一直等待会话。
 - 关闭 Codex 主窗口后面板通常在约 1～2 秒内退出；后台监听继续等待重开。最小化 Codex 不关闭面板。
-- 手动关闭面板后，本次 Codex 打开期间不会反复弹出；可用入口的“启动 / 显示面板”重新显示。
+- 手动关闭面板后，本次 Codex 打开期间不会反复弹出；可从托盘或入口的“启动 / 显示面板”重新显示。托盘“隐藏面板”保留当前进程和读取进度，隐藏状态只在本次运行有效。
 
 目前只支持主窗口的本地聊天。远程主机、云端聊天和多个主窗口的独立跟随尚未实现。累计 token 不等于当前上下文占用，缓存命中率也不代表费用折扣。Codex 日志格式变化时可能需要适配。
 
 ## 停止和移除
 
-临时停止：启动设置 → “停止面板与监听”。
+临时停止：启动设置 → “停止面板与监听”，或托盘 → “退出面板与监听”。该操作不取消登录启动设置；再次运行入口或下次登录后可继续使用。
 
 完全移除：取消自动启动 → 停止面板与监听 → 删除程序文件夹和桌面快捷方式。个人配置在 `%LOCALAPPDATA%\CodexUsagePanel`，由用户决定是否保留；它不属于 Codex 本身的数据目录。
 
@@ -128,13 +138,17 @@ python -B -X utf8 launcher.py
 
 ```powershell
 .\CodexUsagePanel.exe --start
+.\CodexUsagePanel.exe --show
+.\CodexUsagePanel.exe --hide
+.\CodexUsagePanel.exe --recenter
+.\CodexUsagePanel.exe --diagnostics
 .\CodexUsagePanel.exe --shutdown
 .\CodexUsagePanel.exe --install
 .\CodexUsagePanel.exe --disable
 .\CodexUsagePanel.exe --inspect --report .\diagnostics.json
 ```
 
-`--install` 只注册本用户登录启动；`--start` 启动监听；`--disable` 取消该安装的登录启动并停止监听，现有面板可用 `--shutdown` 退出。诊断报告包含本机路径，分享前请自行检查。
+`--install` 只注册本用户登录启动；`--start` 启动监听；`--show` 显示已有面板或重新启动已关闭的面板；`--hide` 隐藏面板；`--recenter` 将面板找回到鼠标所在屏幕；`--diagnostics` 打开运行诊断。`--disable` 取消该安装的登录启动并停止监听，现有面板可用 `--shutdown` 退出。命令行 `--inspect --report` 仍包含本机路径，分享前请检查；GUI 的“复制脱敏诊断”使用独立白名单。
 
 自动启动设置通过 Windows WMI 读取、写入并复核本用户的登录启动项，避免从打包应用内部启动时，私有注册表视图造成“已启用但系统未注册”。如果旧版勾选过却在重启电脑后没有启动，使用修复后的入口重新启用一次，或执行 `--install`，再执行 `--start` 即可恢复；不需要管理员权限。
 
@@ -152,7 +166,7 @@ python -m venv .local\build-venv
 构建产物：
 
 - `dist/CodexUsagePanel/`：可直接运行的完整文件夹。
-- `dist/CodexUsagePanel-v1.0.5-windows-x64.zip`：给其他人的便携包。
+- `dist/CodexUsagePanel-v1.0.6-windows-x64.zip`：给其他人的便携包。
 - `dist/SHA256SUMS.txt`：ZIP 的 SHA-256 校验值。
 
 构建只收集程序、运行时和允许分发的说明文件，并检查个人配置、会话日志是否误入包。中间文件放在 `.local/build`；`.local`、`dist`、本机配置和快捷方式都被 Git 忽略。第三方许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，本项目自身的开源许可证尚未选择。
@@ -165,6 +179,8 @@ python -m venv .local\build-venv
 python -B -X utf8 tests\gui_lifecycle_test.py
 python -B -X utf8 tests\gui_follow_test.py
 python -B -X utf8 tests\gui_reader_recovery_test.py
+python -B -X utf8 tests\gui_controls_test.py
+python -B -X utf8 tests\gui_tray_test.py
 python -B -X utf8 tests\gui_panel_test.py
 python -B -X utf8 tests\gui_visuals_test.py
 python -B -X utf8 tests\gui_appearance_test.py
@@ -186,7 +202,9 @@ python -B -X utf8 tests\test_portable.py
 
 `test_icons.py` 随逻辑测试检查透明边缘、主题颜色、动效像素变化、关闭动画及失败形状提示；`gui_appearance_test.py` 验证主题与图标独立切换和保存、重启恢复、30 种组合的布局与统计不变、图片上传及缓存回收、状态动效和屏幕底部位置恢复；同样使用隔离样本，不修改真实使用设置。
 
-`gui_menu_test.py` 在真实 Tk 弹出循环中检查主题菜单、鼠标/键盘选择、子菜单切换、失焦/外部点击/退出清理、屏幕边界与长菜单滚动；负坐标屏幕使用模拟工作区，不代替实际多显示器验收。
+`gui_menu_test.py` 在真实 Tk 弹出循环中检查主题菜单、鼠标/键盘选择、子菜单切换、失焦/外部点击/退出清理、屏幕边界与长菜单滚动。额外使用 Windows 原生命中检查验证主菜单/子菜单所属关系、重叠区域在置顶开启及关闭时的点击目标，以及面板重绘、材质刷新、图标动画和统计更新后的层级；覆盖上下避让、80%～200% 缩放及设置保持。负坐标和空间不足场景使用模拟工作区，不代替实际多显示器验收。
+
+`test_session_cache.py` 和 `test_diagnostics.py` 随逻辑测试运行，覆盖缓存恢复、文件变更失效、半条日志、速度状态、过期线程、容量上限、诊断脱敏和隔离命令事件。`gui_controls_test.py` 验证隐藏／找回、诊断操作及保存失败后的提示和恢复；`gui_tray_test.py` 验证真实托盘消息、菜单状态、清理和模拟 Explorer 重建通知，不重启实际 Explorer。`gui_lifecycle_test.py` 通过隔离检测器覆盖托盘操作到监听、IPC 和面板的完整链路，不关闭真实 Codex。
 
 `gui_reader_recovery_test.py` 使用独立日志和 Tk 窗口注入读取异常、后台线程退出及刷新异常，验证自动恢复、恢复后的聊天切换和增量统计，以及空闲/远程页面不误重启。
 
